@@ -223,7 +223,7 @@ fn test_render_shell_popup_basic() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, lines, &colors, &[], false, 0);
         })
         .unwrap();
 
@@ -252,7 +252,7 @@ fn test_render_shell_popup_with_content() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, lines, &colors, &[], false, 0);
         })
         .unwrap();
 
@@ -279,7 +279,7 @@ fn test_render_shell_popup_scrolled_up() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, lines, &colors, &[], false, 0);
         })
         .unwrap();
 
@@ -304,7 +304,7 @@ fn test_render_shell_popup_empty_content() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, lines, &colors, &[], false, 0);
         })
         .unwrap();
 
@@ -338,7 +338,7 @@ fn test_render_shell_popup_custom_colors() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 80, 24);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, lines, &colors, &[], false, 0);
         })
         .unwrap();
 
@@ -360,7 +360,7 @@ fn test_render_shell_popup_small_area() {
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, 40, 10);
-            render_shell_popup(&popup, frame, area, lines, &colors);
+            render_shell_popup(&popup, frame, area, lines, &colors, &[], false, 0);
         })
         .unwrap();
 

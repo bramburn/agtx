@@ -3,15 +3,19 @@
 <cite>
 **Referenced Files in This Document**
 - [Cargo.toml](file://Cargo.toml)
-- [src/main.rs](file://src/main.rs)
 - [src/lib.rs](file://src/lib.rs)
+- [src/main.rs](file://src/main.rs)
+- [src/db/mod.rs](file://src/db/mod.rs)
+- [src/db/schema.rs](file://src/db/schema.rs)
+- [src/db/models.rs](file://src/db/models.rs)
+- [src/git/mod.rs](file://src/git/mod.rs)
+- [src/git/operations.rs](file://src/git/operations.rs)
 - [src/tmux/mod.rs](file://src/tmux/mod.rs)
 - [src/tmux/operations.rs](file://src/tmux/operations.rs)
-- [src/db/mod.rs](file://src/db/mod.rs)
-- [src/db/models.rs](file://src/db/models.rs)
-- [src/db/schema.rs](file://src/db/schema.rs)
+- [src/agent/operations.rs](file://src/agent/operations.rs)
 - [src/tui/app.rs](file://src/tui/app.rs)
-- [src/mcp/server.rs](file://src/mcp/server.rs)
+- [src/config/mod.rs](file://src/config/mod.rs)
+- [tests/db_tests.rs](file://tests/db_tests.rs)
 </cite>
 
 ## Table of Contents
@@ -24,398 +28,300 @@
 7. [Performance Considerations](#performance-considerations)
 8. [Troubleshooting Guide](#troubleshooting-guide)
 9. [Conclusion](#conclusion)
-10. [Appendices](#appendices)
 
 ## Introduction
-This document focuses on performance optimization techniques and best practices for large-scale AGTX deployments. It explains the background thread architecture for session refresh, the channel-based communication system, and asynchronous task processing. It also covers memory management strategies, database query optimization, and caching mechanisms for task status and project information. Additional guidance is provided for tmux session optimization, including pane content hashing for idle detection and the performance impact of monitoring many concurrent sessions. Practical examples demonstrate scaling AGTX for teams, optimizing database queries, and managing resource-intensive operations. Finally, it outlines profiling techniques, bottleneck identification, performance monitoring approaches, and system requirements for enterprise-scale usage.
+This document focuses on performance optimization and resource management strategies across the application’s major subsystems: database operations, Git workflows, tmux session orchestration, and the TUI event loop. It synthesizes the repository’s implementation to provide actionable guidance for memory management, concurrency, query optimization, caching, and profiling techniques tailored to multi-agent, multi-project environments.
 
 ## Project Structure
-AGTX is a terminal-native kanban board for managing coding agents. The runtime is event-driven with a TUI and integrates tmux for agent sessions. Data is persisted in SQLite databases (global and per-project). Asynchronous processing is handled via background threads and channels, with a dedicated session refresh pipeline and MCP server for external orchestration.
+The project is organized around modular crates:
+- Application entrypoint and CLI parsing
+- Database layer for task/project state
+- Git operations for worktrees and branch management
+- tmux integration for agent sessions
+- Agent orchestration and registry
+- TUI for interactive control and state management
 
 ```mermaid
 graph TB
-A_main["src/main.rs<br/>Entry point and CLI"] --> B_lib["src/lib.rs<br/>Enums and flags"]
-A_main --> C_tui["src/tui/app.rs<br/>TUI and async loop"]
-C_tui --> D_tmux_mod["src/tmux/mod.rs<br/>tmux ops facade"]
-C_tui --> E_tmux_ops["src/tmux/operations.rs<br/>TmuxOperations trait"]
-C_tui --> F_db_mod["src/db/mod.rs<br/>DB module"]
-F_db_mod --> G_db_models["src/db/models.rs<br/>Data models"]
-F_db_mod --> H_db_schema["src/db/schema.rs<br/>SQLite schema and queries"]
-C_tui --> I_mcp["src/mcp/server.rs<br/>MCP server"]
+Main["main.rs<br/>CLI entrypoint"] --> TUI["tui/app.rs<br/>Interactive UI"]
+Main --> Config["config/mod.rs<br/>Global/Project config"]
+TUI --> DB["db/schema.rs<br/>SQLite ops"]
+TUI --> GitOps["git/operations.rs<br/>Git traits + impl"]
+TUI --> TmuxOps["tmux/operations.rs<br/>tmux traits + impl"]
+TUI --> AgentOps["agent/operations.rs<br/>Agent traits + registry"]
+GitOps --> GitMod["git/mod.rs<br/>Git helpers"]
+TmuxOps --> TmuxMod["tmux/mod.rs<br/>tmux helpers"]
 ```
 
 **Diagram sources**
-- [src/main.rs:1-96](file://src/main.rs#L1-L96)
-- [src/lib.rs:12-24](file://src/lib.rs#L12-L24)
-- [src/tui/app.rs:744-760](file://src/tui/app.rs#L744-L760)
-- [src/tmux/mod.rs:1-189](file://src/tmux/mod.rs#L1-L189)
-- [src/tmux/operations.rs:1-249](file://src/tmux/operations.rs#L1-L249)
-- [src/db/mod.rs:1-6](file://src/db/mod.rs#L1-L6)
-- [src/db/models.rs:1-245](file://src/db/models.rs#L1-L245)
-- [src/db/schema.rs:1-656](file://src/db/schema.rs#L1-L656)
-- [src/mcp/server.rs:394-952](file://src/mcp/server.rs#L394-L952)
+- [src/main.rs:16-96](file://src/main.rs#L16-L96)
+- [src/tui/app.rs:793-800](file://src/tui/app.rs#L793-L800)
+- [src/db/schema.rs:8-10](file://src/db/schema.rs#L8-L10)
+- [src/git/operations.rs:10-75](file://src/git/operations.rs#L10-L75)
+- [src/tmux/operations.rs:8-59](file://src/tmux/operations.rs#L8-L59)
+- [src/agent/operations.rs:16-42](file://src/agent/operations.rs#L16-L42)
+- [src/git/mod.rs:14-26](file://src/git/mod.rs#L14-L26)
+- [src/tmux/mod.rs:8-12](file://src/tmux/mod.rs#L8-L12)
 
 **Section sources**
+- [src/lib.rs:1-24](file://src/lib.rs#L1-L24)
 - [src/main.rs:16-96](file://src/main.rs#L16-L96)
-- [src/lib.rs:12-24](file://src/lib.rs#L12-L24)
-- [src/tui/app.rs:744-760](file://src/tui/app.rs#L744-L760)
-- [src/tmux/mod.rs:11-189](file://src/tmux/mod.rs#L11-L189)
-- [src/tmux/operations.rs:1-249](file://src/tmux/operations.rs#L1-L249)
-- [src/db/mod.rs:1-6](file://src/db/mod.rs#L1-L6)
-- [src/db/models.rs:58-133](file://src/db/models.rs#L58-L133)
-- [src/db/schema.rs:97-208](file://src/db/schema.rs#L97-L208)
-- [src/mcp/server.rs:394-952](file://src/mcp/server.rs#L394-L952)
 
 ## Core Components
-- TUI and async loop: Drives the UI, processes events, and manages background tasks. It maintains caches for phase status and pane content hashes, and coordinates session refresh via a background thread and channel.
-- tmux integration: Provides a trait-based abstraction for tmux operations, enabling deterministic testing and efficient pane capture for idle detection.
-- Database layer: Centralized SQLite schema with indexes and batch operations to optimize reads/writes for tasks, projects, transition requests, and notifications.
-- MCP server: Serves as an external orchestration interface, exposing task and pane operations and acting as a bridge for notifications.
-
-Key performance-relevant elements:
-- Background session refresh thread with a bounded channel for non-blocking updates.
-- Pane content hashing for idle detection to reduce unnecessary processing.
-- Indexes on frequently queried columns (task status, project_id, running_agents).
-- Batch insertions for tasks to minimize transaction overhead.
+- Database: Centralized SQLite-backed storage with transaction batching and indexes for frequent queries.
+- Git: Abstraction over worktrees and branch operations, enabling isolated task execution and conflict checks.
+- tmux: Session/window lifecycle management for agent processes, with pane capture and paste support.
+- Agents: Pluggable agent registry and orchestrator command building for multi-phase workflows.
+- TUI: Interactive board with background refresh, idle detection, and state caches to minimize redraw overhead.
 
 **Section sources**
-- [src/tui/app.rs:448-560](file://src/tui/app.rs#L448-L560)
-- [src/tui/app.rs:6400-6600](file://src/tui/app.rs#L6400-L6600)
-- [src/tui/app.rs:6514-6544](file://src/tui/app.rs#L6514-L6544)
-- [src/tmux/operations.rs:10-59](file://src/tmux/operations.rs#L10-L59)
-- [src/db/schema.rs:117-118](file://src/db/schema.rs#L117-L118)
-- [src/db/schema.rs:204](file://src/db/schema.rs#L204)
-- [src/db/schema.rs:242-274](file://src/db/schema.rs#L242-L274)
+- [src/db/schema.rs:97-208](file://src/db/schema.rs#L97-L208)
+- [src/git/operations.rs:10-75](file://src/git/operations.rs#L10-L75)
+- [src/tmux/operations.rs:8-59](file://src/tmux/operations.rs#L8-L59)
+- [src/agent/operations.rs:16-42](file://src/agent/operations.rs#L16-L42)
+- [src/tui/app.rs:496-610](file://src/tui/app.rs#L496-L610)
 
 ## Architecture Overview
-The runtime combines a TUI with background processing and persistent storage. The session refresh pipeline runs asynchronously, periodically capturing pane content and computing phase status, then sending results back to the main thread via a channel. The MCP server exposes APIs for external clients to interact with tasks and panes.
+The application runs an async main entrypoint and delegates to a TUI loop that periodically polls external systems (tmux, git) and updates internal state. State is persisted to SQLite databases for both project and global scopes.
 
 ```mermaid
 sequenceDiagram
-participant UI as "TUI Loop<br/>src/tui/app.rs"
-participant BG as "Background Refresh Thread<br/>src/tui/app.rs"
-participant CH as "Channel<br/>SessionRefreshResult"
-participant TM as "tmux Ops<br/>src/tmux/operations.rs"
-participant DB as "Database<br/>src/db/schema.rs"
-UI->>BG : spawn background refresh
-BG->>TM : capture_pane(session)
-TM-->>BG : content hash
-BG->>BG : compute PhaseStatus
-BG->>CH : send(SessionRefreshResult)
-UI->>CH : recv()
-CH-->>UI : SessionRefreshResult
-UI->>UI : update caches and UI
-UI->>DB : write notifications (on phase Ready)
-DB-->>UI : ack
+participant CLI as "main.rs"
+participant TUI as "tui/app.rs"
+participant DB as "db/schema.rs"
+participant GIT as "git/operations.rs"
+participant TMUX as "tmux/operations.rs"
+CLI->>TUI : Initialize App with mode/flags
+TUI->>DB : Open project/global DB
+TUI->>GIT : Resolve worktree/branch operations
+TUI->>TMUX : Manage sessions/windows
+TUI->>TUI : Poll phase status, update caches
+TUI->>DB : Persist task/project state
 ```
 
 **Diagram sources**
-- [src/tui/app.rs:6400-6512](file://src/tui/app.rs#L6400-L6512)
-- [src/tui/app.rs:6514-6544](file://src/tui/app.rs#L6514-L6544)
-- [src/tmux/operations.rs:166-172](file://src/tmux/operations.rs#L166-L172)
-- [src/db/schema.rs:598-654](file://src/db/schema.rs#L598-L654)
-
-**Section sources**
-- [src/tui/app.rs:6400-6512](file://src/tui/app.rs#L6400-L6512)
-- [src/tui/app.rs:6514-6544](file://src/tui/app.rs#L6514-L6544)
-- [src/tmux/operations.rs:166-172](file://src/tmux/operations.rs#L166-L172)
-- [src/db/schema.rs:598-654](file://src/db/schema.rs#L598-L654)
+- [src/main.rs:92-93](file://src/main.rs#L92-L93)
+- [src/tui/app.rs:793-800](file://src/tui/app.rs#L793-L800)
+- [src/db/schema.rs:14-67](file://src/db/schema.rs#L14-L67)
+- [src/git/operations.rs:80-276](file://src/git/operations.rs#L80-L276)
+- [src/tmux/operations.rs:64-249](file://src/tmux/operations.rs#L64-L249)
 
 ## Detailed Component Analysis
 
-### Background Session Refresh Pipeline
-The session refresh pipeline runs in a background thread and periodically evaluates task phase status by capturing pane content and detecting artifacts. It uses a channel to deliver results to the main thread, avoiding blocking the UI.
-
-Key behaviors:
-- Computes PhaseStatus (Working, Idle, Ready, Exited) per task.
-- Captures pane content and computes a hash for idle detection.
-- Updates caches: phase_status_cache and pane_content_hashes.
-- On newly Ready tasks, writes notifications for the orchestrator.
-
-```mermaid
-flowchart TD
-Start(["Spawn Background Refresh"]) --> Fetch["Fetch tasks to check"]
-Fetch --> Compute["Compute PhaseStatus per task"]
-Compute --> Capture{"Window exists?"}
-Capture --> |No| MarkExited["Mark Exited if Working"]
-Capture --> |Yes| Hash["Capture pane and compute hash"]
-Hash --> Status["Update caches and UI"]
-MarkExited --> Status
-Status --> Notify{"Newly Ready?"}
-Notify --> |Yes| WriteNotif["Write Notification"]
-Notify --> |No| End(["Done"])
-WriteNotif --> End
-```
-
-**Diagram sources**
-- [src/tui/app.rs:6400-6512](file://src/tui/app.rs#L6400-L6512)
-- [src/tui/app.rs:6514-6544](file://src/tui/app.rs#L6514-L6544)
-- [src/db/schema.rs:598-654](file://src/db/schema.rs#L598-L654)
-
-**Section sources**
-- [src/tui/app.rs:6400-6512](file://src/tui/app.rs#L6400-L6512)
-- [src/tui/app.rs:6514-6544](file://src/tui/app.rs#L6514-L6544)
-- [src/db/schema.rs:598-654](file://src/db/schema.rs#L598-L654)
-
-### tmux Integration and Idle Detection
-tmux operations are abstracted behind a trait to support deterministic testing and efficient pane capture. Idle detection relies on pane content hashing with a 15-second stability threshold for Working tasks. The orchestrator uses a similar fallback mechanism with an explicit idle signal.
-
-Highlights:
-- RealTmuxOps implements window existence checks, pane capture, and cursor info retrieval.
-- Pane content hashing enables stable idle detection without parsing complex ANSI sequences.
-- Orchestrator idle detection supports both explicit signals and fallback timing.
+### Database Layer: Memory Management, Transactions, and Indexing
+- Connection model: Each Database instance holds a rusqlite Connection. Project DBs are stored under a hashed path derived from the project path to avoid filesystem collisions and enable stable filenames.
+- Transaction batching: Bulk inserts use a transaction to reduce WAL overhead and improve throughput.
+- Indexes: Status and project_id indexes optimize filtering and joins commonly used in task queries.
+- Cleanup: Pending transition requests are cleaned up after a time threshold to prevent backlog growth.
+- Concurrency: Tests demonstrate atomic claim semantics and SELECT-then-DELETE consumption patterns for reliable queue processing.
 
 ```mermaid
 classDiagram
-class TmuxOperations {
-<<trait>>
-+create_window(session, window_name, working_dir, command, keep_shell_on_exit) Result
-+kill_window(target) Result
-+window_exists(target) Result
-+send_keys(target, keys) Result
-+send_keys_literal(target, keys) Result
-+paste_text(target, text) Result
-+capture_pane(target) Result~String~
-+capture_pane_with_history(target, history_lines) Vec~u8~
-+get_cursor_info(target) Option~(usize, usize)~
-+resize_window(target, width, height) Result
-+pane_current_command(target) Option~String~
-+has_session(session) bool
-+create_session(session, working_dir) Result
+class Database {
++open_project(project_path)
++open_global()
++create_tasks_batch(tasks)
++get_tasks_by_status(status)
++claim_transition_request(id, claimant) bool
++cleanup_old_transition_requests()
 }
-class RealTmuxOps {
-+implements TmuxOperations
+class Task {
++id
++status
++project_id
 }
-TmuxOperations <|.. RealTmuxOps
+Database --> Task : "persists"
 ```
 
 **Diagram sources**
-- [src/tmux/operations.rs:10-59](file://src/tmux/operations.rs#L10-L59)
-- [src/tmux/operations.rs:64-248](file://src/tmux/operations.rs#L64-L248)
+- [src/db/schema.rs:14-67](file://src/db/schema.rs#L14-L67)
+- [src/db/schema.rs:242-274](file://src/db/schema.rs#L242-L274)
+- [src/db/schema.rs:511-554](file://src/db/schema.rs#L511-L554)
+- [src/db/models.rs:58-79](file://src/db/models.rs#L58-L79)
 
 **Section sources**
-- [src/tmux/operations.rs:10-59](file://src/tmux/operations.rs#L10-L59)
-- [src/tmux/operations.rs:64-248](file://src/tmux/operations.rs#L64-L248)
-- [src/tmux/mod.rs:168-188](file://src/tmux/mod.rs#L168-L188)
+- [src/db/schema.rs:14-67](file://src/db/schema.rs#L14-L67)
+- [src/db/schema.rs:97-180](file://src/db/schema.rs#L97-L180)
+- [src/db/schema.rs:242-274](file://src/db/schema.rs#L242-L274)
+- [src/db/schema.rs:511-554](file://src/db/schema.rs#L511-L554)
+- [tests/db_tests.rs:394-422](file://tests/db_tests.rs#L394-L422)
 
-### Database Layer and Query Optimization
-The database layer uses SQLite with targeted indexes and batch operations to improve throughput. It separates concerns between global and project-scoped data.
-
-Key optimizations:
-- Indexes on tasks(status) and tasks(project_id) to accelerate filtering and joins.
-- Batch insertion for tasks to reduce transaction overhead.
-- Atomic operations for notifications and transition requests to prevent duplication under concurrency.
-- Stable per-project database filenames derived from hashed project paths.
+### Git Operations: Worktree Efficiency and Branch Management
+- Worktree lifecycle: Creation, existence checks, and removal are exposed via a trait to support mocking and consistent behavior.
+- Conflict detection: Uses non-destructive merge-tree checks to detect conflicts without altering working trees.
+- Diff operations: Provides staged/unstaged diffs and statistics to inform task progress and reduce unnecessary commits.
+- Network minimization: Fetch is invoked before conflict checks to keep local refs fresh.
 
 ```mermaid
-erDiagram
-TASKS {
-text id PK
-text title
-text description
-text status
-text agent
-text project_id
-text session_name
-text worktree_path
-text branch_name
-int pr_number
-text pr_url
-text plugin
-text created_at
-text updated_at
-}
-TRANSITION_REQUESTS {
-text id PK
-text task_id
-text action
-text reason
-text requested_at
-text processed_at
-text error
-text claimed_by
-}
-NOTIFICATIONS {
-text id PK
-text message
-text created_at
-}
-PROJECTS {
-text id PK
-text name
-text path UK
-text github_url
-text default_agent
-text last_opened
-}
-RUNNING_AGENTS {
-text session_name PK
-text project_id
-text task_id
-text agent_name
-text started_at
-text status
-}
-PROJECTS ||--o{ TASKS : "tracks"
-RUNNING_AGENTS }o--|| TASKS : "runs"
+flowchart TD
+Start(["Start worktree operation"]) --> Exists{"Worktree exists?"}
+Exists --> |No| Create["Create worktree from base branch"]
+Exists --> |Yes| Use["Use existing worktree"]
+Create --> Init["Initialize worktree (files/scripts)"]
+Use --> Diff["Compute diffs/statistics"]
+Init --> Diff
+Diff --> Conflict{"Conflicts detected?"}
+Conflict --> |Yes| Report["Report conflicts to UI"]
+Conflict --> |No| Proceed["Proceed to next phase"]
+Report --> End(["End"])
+Proceed --> End
 ```
 
 **Diagram sources**
-- [src/db/schema.rs:97-208](file://src/db/schema.rs#L97-L208)
-- [src/db/schema.rs:117-118](file://src/db/schema.rs#L117-L118)
-- [src/db/schema.rs:204](file://src/db/schema.rs#L204)
+- [src/git/operations.rs:80-276](file://src/git/operations.rs#L80-L276)
+- [src/git/mod.rs:18-142](file://src/git/mod.rs#L18-L142)
 
 **Section sources**
-- [src/db/schema.rs:97-208](file://src/db/schema.rs#L97-L208)
-- [src/db/schema.rs:117-118](file://src/db/schema.rs#L117-L118)
-- [src/db/schema.rs:204](file://src/db/schema.rs#L204)
-- [src/db/schema.rs:242-274](file://src/db/schema.rs#L242-L274)
-- [src/db/schema.rs:478-554](file://src/db/schema.rs#L478-L554)
-- [src/db/schema.rs:598-654](file://src/db/schema.rs#L598-L654)
+- [src/git/operations.rs:10-75](file://src/git/operations.rs#L10-L75)
+- [src/git/operations.rs:211-243](file://src/git/operations.rs#L211-L243)
+- [src/git/mod.rs:18-142](file://src/git/mod.rs#L18-L142)
 
-### MCP Server and External Orchestration
-The MCP server exposes endpoints for task and pane operations, enabling external clients to drive AGTX. It integrates with the database to enforce constraints and route actions.
-
-Highlights:
-- Validates task phase before allowing message injection.
-- Uses tmux commands to send keys to active sessions.
-- Manages a transition request queue with atomic claiming and cleanup.
+### tmux Integration: Session and Pane Management
+- Session management: Dedicated server name isolates agent sessions. Functions wrap tmux commands for spawning, listing, attaching, capturing panes, and killing sessions.
+- Window management: Create windows with optional shell retention on exit, paste text via load-buffer/paste-buffer, and capture pane content with or without history.
+- Safety: Argument quoting and sanitization for session names to avoid shell injection.
 
 ```mermaid
 sequenceDiagram
-participant Client as "External Client"
-participant MCP as "AgtxMcpServer<br/>src/mcp/server.rs"
-participant DB as "Database<br/>src/db/schema.rs"
-participant TM as "tmux<br/>src/tmux/mod.rs"
-Client->>MCP : send_to_task(task_id, message)
-MCP->>DB : get_task(task_id)
-DB-->>MCP : Task
-MCP->>MCP : validate active phase
-MCP->>TM : send-keys to session
-TM-->>MCP : result
-MCP-->>Client : response
+participant TUI as "tui/app.rs"
+participant OPS as "tmux/operations.rs"
+participant TMUX as "tmux daemon"
+TUI->>OPS : create_window(session, name, dir, cmd, keep_shell)
+OPS->>TMUX : new-window -d -t : -n -c sh -c
+TMUX-->>OPS : status
+OPS-->>TUI : Result
+TUI->>OPS : capture_pane(target)
+OPS->>TMUX : capture-pane -t -p
+TMUX-->>OPS : stdout
+OPS-->>TUI : content
 ```
 
 **Diagram sources**
-- [src/mcp/server.rs:915-952](file://src/mcp/server.rs#L915-L952)
-- [src/db/schema.rs:353-359](file://src/db/schema.rs#L353-L359)
-- [src/tmux/mod.rs:109-118](file://src/tmux/mod.rs#L109-L118)
+- [src/tmux/operations.rs:64-249](file://src/tmux/operations.rs#L64-L249)
+- [src/tmux/mod.rs:11-189](file://src/tmux/mod.rs#L11-L189)
 
 **Section sources**
-- [src/mcp/server.rs:915-952](file://src/mcp/server.rs#L915-L952)
-- [src/db/schema.rs:353-359](file://src/db/schema.rs#L353-L359)
-- [src/tmux/mod.rs:109-118](file://src/tmux/mod.rs#L109-L118)
+- [src/tmux/operations.rs:8-59](file://src/tmux/operations.rs#L8-L59)
+- [src/tmux/operations.rs:148-164](file://src/tmux/operations.rs#L148-L164)
+- [src/tmux/operations.rs:166-182](file://src/tmux/operations.rs#L166-L182)
+- [src/tmux/mod.rs:144-166](file://src/tmux/mod.rs#L144-L166)
 
-## Dependency Analysis
-The application’s performance depends on several subsystems and their interactions. The following diagram highlights key dependencies and their impact on scalability.
+### Agent Orchestration: Multi-Agent Workflows
+- Agent registry: Dynamically selects agents per phase, with a fallback to the default agent.
+- Orchestrator command building: Generates agent-specific commands for MCP registration and cleanup, ensuring robust restart/resume behavior.
 
 ```mermaid
-graph TB
-subgraph "Runtime"
-Tokio["Tokio Runtime<br/>Cargo.toml"]
-TUI["TUI Loop<br/>src/tui/app.rs"]
-DB["Database<br/>src/db/schema.rs"]
-TMUX["tmux Ops<br/>src/tmux/operations.rs"]
-MCP["MCP Server<br/>src/mcp/server.rs"]
-end
-Tokio --> TUI
-TUI --> DB
-TUI --> TMUX
-TUI --> MCP
-MCP --> DB
+classDiagram
+class AgentRegistry {
++get(agent_name) AgentOperations
+}
+class CodingAgent {
++build_orchestrator_command(mcp_json, bin) string
++generate_text(working_dir, prompt) string
+}
+AgentRegistry --> CodingAgent : "provides"
 ```
 
 **Diagram sources**
-- [Cargo.toml:17-18](file://Cargo.toml#L17-L18)
-- [src/tui/app.rs:744-760](file://src/tui/app.rs#L744-L760)
-- [src/db/schema.rs:1-10](file://src/db/schema.rs#L1-L10)
-- [src/tmux/operations.rs:64-248](file://src/tmux/operations.rs#L64-L248)
-- [src/mcp/server.rs:394-399](file://src/mcp/server.rs#L394-L399)
+- [src/agent/operations.rs:112-163](file://src/agent/operations.rs#L112-L163)
+- [src/agent/operations.rs:55-108](file://src/agent/operations.rs#L55-L108)
 
 **Section sources**
-- [Cargo.toml:17-18](file://Cargo.toml#L17-L18)
-- [src/tui/app.rs:744-760](file://src/tui/app.rs#L744-L760)
-- [src/db/schema.rs:1-10](file://src/db/schema.rs#L1-L10)
-- [src/tmux/operations.rs:64-248](file://src/tmux/operations.rs#L64-L248)
-- [src/mcp/server.rs:394-399](file://src/mcp/server.rs#L394-L399)
+- [src/agent/operations.rs:16-42](file://src/agent/operations.rs#L16-L42)
+- [src/agent/operations.rs:112-163](file://src/agent/operations.rs#L112-L163)
+
+### TUI: Event Loop, Caching, and Idle Detection
+- State caches: Phase status cache, pane content hashes, dependency satisfaction cache, and orchestrator idle tracking reduce repeated IO and computation.
+- Background refresh: Non-blocking session refresh channels decouple UI updates from long-running operations.
+- Rendering: Efficient footer item construction and click-region hit-testing minimize layout churn.
+
+```mermaid
+flowchart TD
+Poll["Background poll"] --> Status["Collect tmux phase status"]
+Status --> Cache["Update phase_status_cache"]
+Cache --> Redraw["Schedule UI redraw"]
+Redraw --> Capture["Capture pane content"]
+Capture --> Hash["Compute content hash"]
+Hash --> Idle["Detect idle/not waiting"]
+Idle --> Actions["Advance tasks / notify"]
+```
+
+**Diagram sources**
+- [src/tui/app.rs:571-580](file://src/tui/app.rs#L571-L580)
+- [src/tui/app.rs:656-677](file://src/tui/app.rs#L656-L677)
+
+**Section sources**
+- [src/tui/app.rs:496-610](file://src/tui/app.rs#L496-L610)
+- [src/tui/app.rs:656-677](file://src/tui/app.rs#L656-L677)
+
+## Dependency Analysis
+- Runtime: Tokio full features enable async I/O and task spawning.
+- Serialization: Serde for configuration and data interchange.
+- Database: rusqlite with bundled feature for embedded SQLite.
+- UI: Ratatui + Crossterm for terminal rendering and input.
+- MCP: rmcp for server and transport features.
+
+```mermaid
+graph LR
+Cargo["Cargo.toml"] --> Tokio["tokio (full)"]
+Cargo --> SQLite["rusqlite (bundled)"]
+Cargo --> Serde["serde"]
+Cargo --> MCP["rmcp (server, transport-io)"]
+Cargo --> TUI["ratatui + crossterm"]
+```
+
+**Diagram sources**
+- [Cargo.toml:12-38](file://Cargo.toml#L12-L38)
+
+**Section sources**
+- [Cargo.toml:12-38](file://Cargo.toml#L12-L38)
 
 ## Performance Considerations
-- Concurrency model
-  - Use a single background thread per refresh cycle to avoid contention. Limit the number of simultaneous pane captures to balance responsiveness and CPU usage.
-  - Employ a bounded channel for session refresh results to prevent unbounded memory growth. Tune buffer sizes based on peak concurrent tasks.
 
-- Memory management
-  - Keep pane content hashes in a HashMap keyed by task_id. Clear entries on Ready or Exited to bound memory growth.
-  - Cache phase status per task to avoid repeated computation and DB reads.
+### Memory Management Best Practices
+- Database connections: Keep a small number of long-lived Connection instances per project/global scope. Use transaction batching for bulk writes to reduce WAL sync frequency.
+- Caching: Leverage in-memory caches (phase status, pane content hashes, dependency satisfaction) to avoid repeated disk and process calls. Invalidate caches on state changes.
+- TUI rendering: Minimize redraws by updating only changed regions and deferring expensive computations to background threads.
 
-- Database optimization
-  - Prefer batch inserts for tasks to reduce transaction overhead.
-  - Use indexes on status and project_id to speed up filtering and joins.
-  - Clean up old transition requests and notifications periodically to maintain small working sets.
+### Concurrent Operation Optimization
+- Asynchronous I/O: Use Tokio tasks for Git and tmux operations to avoid blocking the UI thread. Channel results back to the main thread for state updates.
+- Atomic queues: Use database UPDATE with WHERE clause to atomically claim transition requests and SELECT-then-DELETE patterns for reliable consumption.
+- Background refresh: Offload periodic tmux pane captures and status polling to background workers to keep the UI responsive.
 
-- tmux session optimization
-  - Avoid capturing panes for non-existent windows to prevent errors and wasted cycles.
-  - Use pane_current_command to gate operations when the pane is idle or uninitialized.
-  - For large-scale deployments, consider staggering refresh intervals to distribute load.
+### Database Performance Tuning
+- Indexes: Maintain status and project_id indexes for fast filtering. Add indexes for frequently queried columns (e.g., task_id in transition_requests).
+- Queries: Prefer prepared statements and parameterized queries to reduce parsing overhead.
+- Cleanup: Periodically prune old transition requests to maintain query performance and storage efficiency.
+- Transactions: Batch related writes (e.g., create_tasks_batch) to reduce transaction overhead.
 
-- Scaling AGTX for teams
-  - Separate global and project databases to isolate workloads and enable independent maintenance.
-  - Use MCP endpoints to offload heavy operations to external workers while keeping the TUI responsive.
-  - Monitor orchestrator idle detection to avoid overwhelming agents with notifications.
+### Git Operation Performance Improvements
+- Worktree reuse: Reuse existing worktrees when possible to avoid redundant clone/copy operations.
+- Conflict checks: Run non-destructive merge-tree checks before risky operations to fail fast.
+- Diff granularity: Use diff-stat for quick summaries and full diffs only when needed to reduce output processing.
 
-- Resource allocation and capacity planning
-  - Provision CPU cores proportional to the number of concurrent tasks and background refresh cycles.
-  - Allocate disk I/O headroom for SQLite writes and tmux pane captures.
-  - Plan memory budgets for pane content hashes and UI state caches.
+### tmux Session Performance Considerations
+- Pane capture: Limit history capture to recent lines when possible to reduce memory usage.
+- Session persistence: Use a dedicated server name to avoid interference and simplify cleanup.
+- Resource allocation: Size panes and windows according to terminal dimensions to prevent excessive scrolling and redraw overhead.
+
+### Profiling and Monitoring
+- Metrics: Track phase status transitions, tmux pane capture durations, and background refresh intervals.
+- Logging: Use tracing to instrument slow paths and correlate events across components.
+- Bottleneck identification: Focus on longest-running operations (Git fetch/merge, tmux pane capture, database writes) and optimize iteratively.
 
 [No sources needed since this section provides general guidance]
 
 ## Troubleshooting Guide
-Common performance issues and remedies:
-- UI stalls during refresh
-  - Cause: Too many simultaneous pane captures or long-running tasks.
-  - Remedy: Reduce concurrent refreshes, increase refresh interval, or cap the number of tasks polled per cycle.
-
-- Excessive memory usage
-  - Cause: Uncleared pane content hashes or phase status caches.
-  - Remedy: Ensure caches are cleared on Ready and Exited transitions; monitor cache sizes.
-
-- Slow database writes
-  - Cause: Frequent single-row inserts.
-  - Remedy: Use batch insertions for tasks; consolidate writes.
-
-- MCP latency
-  - Cause: tmux send-keys delays or busy panes.
-  - Remedy: Validate task phase before sending messages; use orchestrator idle detection to avoid noisy notifications.
+- Database contention: If concurrent claims or consumes fail, verify atomic UPDATE/SELECT patterns and ensure cleanup jobs are running.
+- Git failures: Inspect fetch and merge-tree exit codes; ensure remote refs are reachable and local working trees are clean.
+- tmux errors: Validate session names and target identifiers; ensure the dedicated server is running and accessible.
+- TUI responsiveness: Reduce background work or increase batching to lower UI latency.
 
 **Section sources**
-- [src/tui/app.rs:6514-6544](file://src/tui/app.rs#L6514-L6544)
-- [src/db/schema.rs:242-274](file://src/db/schema.rs#L242-L274)
-- [src/mcp/server.rs:915-952](file://src/mcp/server.rs#L915-L952)
+- [src/db/schema.rs:535-543](file://src/db/schema.rs#L535-L543)
+- [src/db/schema.rs:631-654](file://src/db/schema.rs#L631-L654)
+- [src/git/operations.rs:211-243](file://src/git/operations.rs#L211-L243)
+- [src/tmux/operations.rs:112-118](file://src/tmux/operations.rs#L112-L118)
 
 ## Conclusion
-AGTX achieves scalable performance through a combination of background processing, channel-based communication, tmux pane hashing for idle detection, and SQLite optimizations. By tuning concurrency, managing caches, and leveraging MCP for external orchestration, teams can operate efficiently at enterprise scale. Regular profiling and capacity planning will ensure sustained performance as task volumes grow.
-
-[No sources needed since this section summarizes without analyzing specific files]
-
-## Appendices
-
-### Practical Examples
-- Scaling for teams
-  - Use MCP to enqueue transition requests and process them atomically with claim semantics to avoid duplicates.
-  - Separate global and project databases to isolate workloads and simplify backups.
-
-- Optimizing database queries
-  - Filter tasks by status and project_id using indexed columns.
-  - Batch-create tasks to reduce transaction overhead.
-
-- Managing resource-intensive operations
-  - Stagger pane captures and artifact detection to limit CPU usage.
-  - Use orchestrator idle detection to gate notifications and reduce agent churn.
-
-**Section sources**
-- [src/db/schema.rs:478-554](file://src/db/schema.rs#L478-L554)
-- [src/db/schema.rs:117-118](file://src/db/schema.rs#L117-L118)
-- [src/db/schema.rs:242-274](file://src/db/schema.rs#L242-L274)
-- [src/tui/app.rs:6400-6512](file://src/tui/app.rs#L6400-L6512)
-- [src/mcp/server.rs:915-952](file://src/mcp/server.rs#L915-L952)
+By combining efficient database transactions, targeted indexing, asynchronous background processing, and pragmatic caching, the system achieves responsive multi-agent workflows across multiple projects. Prioritize minimizing blocking operations, leveraging atomic DB patterns, and optimizing hot paths (Git fetch/merge, tmux pane capture, and UI redraws) to sustain performance at scale.

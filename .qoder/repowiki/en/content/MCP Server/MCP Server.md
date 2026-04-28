@@ -2,19 +2,15 @@
 
 <cite>
 **Referenced Files in This Document**
+- [server.rs](file://src/mcp/server.rs)
+- [mod.rs](file://src/mcp/mod.rs)
+- [main.rs](file://src/main.rs)
+- [schema.rs](file://src/db/schema.rs)
+- [.mcp.json](file://\.mcp.json)
 - [README.md](file://README.md)
 - [CLAUDE.md](file://CLAUDE.md)
-- [AGENTS.md](file://AGENTS.md)
-- [.mcp.json](file://.mcp.json)
-- [src/main.rs](file://src/main.rs)
-- [src/mcp/mod.rs](file://src/mcp/mod.rs)
-- [src/mcp/server.rs](file://src/mcp/server.rs)
-- [src/db/models.rs](file://src/db/models.rs)
-- [src/db/mod.rs](file://src/db/mod.rs)
-- [src/config/mod.rs](file://src/config/mod.rs)
-- [src/tmux/operations.rs](file://src/tmux/operations.rs)
-- [src/git/operations.rs](file://src/git/operations.rs)
-- [tests/mcp_tests.rs](file://tests/mcp_tests.rs)
+- [mcp_tests.rs](file://tests/mcp_tests.rs)
+- [operations.rs](file://src/agent/operations.rs)
 </cite>
 
 ## Table of Contents
@@ -30,451 +26,497 @@
 10. [Appendices](#appendices)
 
 ## Introduction
-This document explains the MCP (Model Context Protocol) server implemented by AGTX for JSON-RPC over stdio, enabling external tools and agents to integrate with the terminal-based kanban board. It covers MCP fundamentals, AGTX’s implementation, operational modes (global vs project-scoped), all available tools, integration examples with Claude Code, Codex, and Gemini CLI, configuration and security considerations, orchestrator agent integration, troubleshooting, and best practices.
+This document explains the MCP (Model Context Protocol) server implementation that powers external orchestration and integration with agtx. It covers JSON-RPC over stdio, tool registration, and notification systems. It documents the two operational modes (global vs project-scoped), all available tools with parameters and return values, orchestrator agent integration, push-when-idle notifications, practical client examples, error handling, debugging, security considerations, and integration guidance for AI coding platforms.
 
 ## Project Structure
-The MCP server is implemented as a thin JSON-RPC layer over stdio, backed by AGTX’s database and system integrations:
-- CLI entry routes to the MCP server when invoked with the “mcp-serve” command.
-- The MCP server exposes tools for listing projects, listing/managing tasks, queuing transitions, checking conflicts, and interacting with agent sessions via tmux.
-- Database models and operations underpin task/project state and persistence.
-- Configuration and plugin systems influence agent selection and workflow behavior.
+The MCP server is implemented as a thin wrapper around the agtx task board, exposing a curated set of tools over JSON-RPC via stdio. The server integrates with the TUI’s database and tmux sessions to enable external agents to manage tasks programmatically.
 
 ```mermaid
 graph TB
-subgraph "CLI"
+subgraph "CLI Entrypoint"
 MAIN["src/main.rs<br/>Parse args, dispatch 'mcp-serve'"]
 end
 subgraph "MCP Server"
 MOD["src/mcp/mod.rs<br/>Expose serve, ServerMode"]
 SRV["src/mcp/server.rs<br/>AgtxMcpServer, tools, modes"]
 end
-subgraph "Data Layer"
-DBMOD["src/db/mod.rs<br/>Database re-export"]
-MODELS["src/db/models.rs<br/>Task, Project, Status, Notifications"]
-end
-subgraph "System Integrations"
-TMUX["src/tmux/operations.rs<br/>tmux ops"]
-GITOPS["src/git/operations.rs<br/>git ops"]
+subgraph "Integration"
+CFG[".mcp.json<br/>stdio registration"]
+AGOPS["src/agent/operations.rs<br/>Agent registry & MCP add/remove"]
 end
 MAIN --> MOD
 MOD --> SRV
-SRV --> DBMOD
-SRV --> TMUX
-SRV --> GITOPS
-DBMOD --> MODELS
+SRV --> CFG
+SRV --> AGOPS
 ```
 
 **Diagram sources**
-- [src/main.rs:30-46](file://src/main.rs#L30-L46)
-- [src/mcp/mod.rs:1-5](file://src/mcp/mod.rs#L1-L5)
-- [src/mcp/server.rs:1245-1264](file://src/mcp/server.rs#L1245-L1264)
-- [src/db/mod.rs:1-6](file://src/db/mod.rs#L1-L6)
-- [src/db/models.rs:58-184](file://src/db/models.rs#L58-L184)
-- [src/tmux/operations.rs:61-248](file://src/tmux/operations.rs#L61-L248)
-- [src/git/operations.rs:77-275](file://src/git/operations.rs#L77-L275)
+- [main.rs:30-46](file://src/main.rs#L30-L46)
+- [mod.rs:1-5](file://src/mcp/mod.rs#L1-L5)
+- [server.rs:1245-1263](file://src/mcp/server.rs#L1245-L1263)
+- [.mcp.json:1-8](file://\.mcp.json#L1-L8)
+- [operations.rs:92-107](file://src/agent/operations.rs#L92-L107)
 
 **Section sources**
-- [src/main.rs:30-46](file://src/main.rs#L30-L46)
-- [src/mcp/mod.rs:1-5](file://src/mcp/mod.rs#L1-L5)
-- [src/mcp/server.rs:1245-1264](file://src/mcp/server.rs#L1245-L1264)
-- [src/db/mod.rs:1-6](file://src/db/mod.rs#L1-L6)
-- [src/db/models.rs:58-184](file://src/db/models.rs#L58-L184)
-- [src/tmux/operations.rs:61-248](file://src/tmux/operations.rs#L61-L248)
-- [src/git/operations.rs:77-275](file://src/git/operations.rs#L77-L275)
+- [main.rs:30-46](file://src/main.rs#L30-L46)
+- [mod.rs:1-5](file://src/mcp/mod.rs#L1-L5)
+- [.mcp.json:1-8](file://\.mcp.json#L1-L8)
+- [operations.rs:92-107](file://src/agent/operations.rs#L92-L107)
 
 ## Core Components
-- ServerMode: Two modes—Project-scoped (fixed path) and Global (requires project_id).
-- AgtxMcpServer: Implements MCP tools and routes them via a tool router.
-- Tools: list_projects, list_tasks, get_task, create_task, create_tasks_batch, update_task, delete_task, move_task, get_transition_status, check_conflicts, get_notifications, read_pane_content, send_to_task.
-- Database integration: Tasks, Projects, TransitionRequests, Notifications.
-- System integrations: tmux for agent sessions, git for worktrees and conflict checks.
+- ServerMode: Two modes determine how tools resolve project context.
+  - Global: All CRUD tools require a project_id parameter; list_projects is called first to discover IDs.
+  - Project: Fixed project path; project_id is ignored.
+- AgtxMcpServer: Implements tool handlers and MCP ServerHandler.
+- Tool router: Declares tools with descriptions and parameter schemas.
+- Transport: JSON-RPC over stdio via rmcp.
+
+Key responsibilities:
+- Resolve project path and open appropriate DB (global vs project).
+- Validate parameters and enforce status-dependent rules.
+- Enforce dependency gating for Backlog forward transitions.
+- Expose tmux pane read/send for diagnostics and nudging.
+- Provide notifications for orchestrator push-when-idle.
 
 **Section sources**
-- [src/mcp/server.rs:16-24](file://src/mcp/server.rs#L16-L24)
-- [src/mcp/server.rs:395-471](file://src/mcp/server.rs#L395-L471)
-- [src/db/models.rs:58-184](file://src/db/models.rs#L58-L184)
-- [src/tmux/operations.rs:61-248](file://src/tmux/operations.rs#L61-L248)
-- [src/git/operations.rs:77-275](file://src/git/operations.rs#L77-L275)
+- [server.rs:16-24](file://src/mcp/server.rs#L16-L24)
+- [server.rs:395-471](file://src/mcp/server.rs#L395-L471)
+- [server.rs:1218-1242](file://src/mcp/server.rs#L1218-L1242)
 
 ## Architecture Overview
-The MCP server runs as a JSON-RPC service over stdio. Agents register the server and call tools to manage tasks and agent sessions.
+The MCP server sits between external agents and the TUI. It validates requests, enforces workflow rules, and coordinates with tmux and the database.
 
 ```mermaid
 sequenceDiagram
-participant Agent as "Agent (Claude Code / Codex / Gemini)"
-participant MCP as "AgtxMcpServer (stdio)"
-participant DB as "SQLite (index.db / projects/*.db)"
-participant TMUX as "tmux server 'agtx'"
-participant GIT as "git"
-Agent->>MCP : "list_projects" (Global mode)
-MCP->>DB : "get_all_projects()"
-DB-->>MCP : "Project list"
-MCP-->>Agent : "JSON response"
-Agent->>MCP : "list_tasks(project_id?)"
-MCP->>DB : "get_tasks_by_status(...) or get_all_tasks()"
-DB-->>MCP : "Task list"
-MCP-->>Agent : "JSON response"
-Agent->>MCP : "move_task(task_id, action, project_id?)"
-MCP->>DB : "create_transition_request(...)"
-DB-->>MCP : "OK"
+participant Agent as "External Agent"
+participant MCP as "AgtxMcpServer"
+participant DB as "Database"
+participant TMUX as "tmux"
+Agent->>MCP : "list_tasks" (params)
+MCP->>DB : "get_tasks_by_status" or "get_all_tasks"
+DB-->>MCP : "tasks"
+MCP-->>Agent : "JSON array of task summaries"
+Agent->>MCP : "move_task" (task_id, action)
+MCP->>DB : "create_transition_request"
+DB-->>MCP : "ack"
 MCP-->>Agent : "request_id"
-Agent->>MCP : "get_transition_status(request_id, project_id?)"
-MCP->>DB : "get_transition_request(...)"
+Agent->>MCP : "get_transition_status" (request_id)
+MCP->>DB : "get_transition_request"
 DB-->>MCP : "status/error"
-MCP-->>Agent : "JSON response"
-Agent->>MCP : "read_pane_content(task_id, lines?, project_id?)"
-MCP->>TMUX : "capture-pane -t session"
-TMUX-->>MCP : "pane content"
-MCP-->>Agent : "JSON response"
-Agent->>MCP : "send_to_task(task_id, message, project_id?)"
-MCP->>TMUX : "send-keys + Enter"
-TMUX-->>MCP : "OK"
-MCP-->>Agent : "JSON response"
-Agent->>MCP : "check_conflicts(task_id?, project_id?)"
-MCP->>GIT : "merge-tree check"
-GIT-->>MCP : "conflicts/no-conflicts"
-MCP-->>Agent : "JSON response"
+MCP-->>Agent : "status JSON"
+Agent->>MCP : "read_pane_content" (task_id, lines)
+MCP->>TMUX : "capture-pane"
+TMUX-->>MCP : "content"
+MCP-->>Agent : "content JSON"
+Agent->>MCP : "send_to_task" (task_id, message)
+MCP->>TMUX : "send-keys Enter"
+TMUX-->>MCP : "ack"
+MCP-->>Agent : "success JSON"
 ```
 
 **Diagram sources**
-- [src/mcp/server.rs:521-1216](file://src/mcp/server.rs#L521-L1216)
-- [src/db/models.rs:58-184](file://src/db/models.rs#L58-L184)
-- [src/tmux/operations.rs:166-182](file://src/tmux/operations.rs#L166-L182)
-- [src/git/operations.rs:211-243](file://src/git/operations.rs#L211-L243)
+- [server.rs:548-588](file://src/mcp/server.rs#L548-L588)
+- [server.rs:658-721](file://src/mcp/server.rs#L658-L721)
+- [server.rs:729-755](file://src/mcp/server.rs#L729-L755)
+- [server.rs:863-910](file://src/mcp/server.rs#L863-L910)
+- [server.rs:915-974](file://src/mcp/server.rs#L915-L974)
 
 ## Detailed Component Analysis
 
-### MCP Server Modes
-- Global mode: Requires project_id for all CRUD tools; resolves project path via the global DB.
-- Project-scoped mode: Bound to a single project path at startup; ignores project_id.
+### Operational Modes
+- Global mode:
+  - Requires project_id for all CRUD tools.
+  - Use list_projects to discover project IDs.
+  - Validates global DB availability.
+- Project-scoped mode:
+  - Fixed project path at startup.
+  - project_id is ignored.
+  - Validates project DB availability.
+
+Resolution and defaults:
+- resolve_project_path: returns fixed path or resolves from global DB.
+- open_project_db_for/open_project_db/open_global_db: open appropriate DB.
+- config_defaults_for: merges global and project configs for defaults.
+
+**Section sources**
+- [server.rs:409-444](file://src/mcp/server.rs#L409-L444)
+- [server.rs:1245-1263](file://src/mcp/server.rs#L1245-L1263)
+- [CLAUDE.md:215-226](file://CLAUDE.md#L215-L226)
+
+### Tool Catalog and Semantics
+
+- list_projects
+  - Params: none
+  - Returns: array of project summaries (id, name, path)
+  - Use case: discover project IDs in global mode
+  - Notes: opens global DB
+
+- list_tasks
+  - Params: status (optional), project_id (required in global mode)
+  - Returns: array of task summaries (id, title, status, agent, branch/pr, plugin, deps_satisfied)
+  - Use case: enumerate tasks, optionally filter by status
+
+- get_task
+  - Params: task_id, project_id (required in global mode)
+  - Returns: task detail (including allowed_actions computed from plugin rules and dependency satisfaction)
+  - Use case: inspect task state and valid actions
+
+- create_task
+  - Params: title, description (optional), plugin (optional), referenced_tasks (comma-separated IDs), base_branch (optional), project_id (required in global mode)
+  - Returns: created task id and initial status
+  - Use case: add a single backlog task
+  - Validation: referenced_tasks existence checked
+
+- create_tasks_batch
+  - Params: tasks[], each with title/description/plugin/base_branch, depends_on (indices into tasks array), project_id (required in global mode)
+  - Returns: created tasks with indices and ids
+  - Use case: add multiple tasks with inter-task dependencies
+  - Validation: no forward references, duplicates disallowed, max 50 tasks
+
+- update_task
+  - Params: task_id, plus optional fields (title, description, plugin, referenced_tasks, base_branch)
+  - Returns: updated fields list
+  - Use case: edit backlog task metadata
+  - Validation: only backlog tasks can be updated; referenced_tasks existence checked
+
+- delete_task
+  - Params: task_id, project_id (required in global mode)
+  - Returns: deletion confirmation
+  - Use case: remove backlog tasks
+  - Validation: only backlog tasks can be deleted
+
+- move_task
+  - Params: task_id, action (research, move_forward, move_to_planning, move_to_running, move_to_review, move_to_done, resume, escalate_to_user), reason (optional), project_id (required in global mode)
+  - Returns: request_id and message
+  - Use case: queue a phase transition
+  - Validation: action must be valid; Backlog forward transitions gated by dependency satisfaction; task existence verified
+
+- get_transition_status
+  - Params: request_id, project_id (required in global mode)
+  - Returns: status (pending/completed/error) and optional error message
+  - Use case: poll for completion of queued transitions
+
+- check_conflicts
+  - Params: task_id (optional), project_id (required in global mode)
+  - Returns: main_branch and results per task (has_conflicts, conflicting_files, optional error)
+  - Use case: non-destructive conflict detection for Review tasks or a specific task
+
+- get_notifications
+  - Params: project_id (required in global mode)
+  - Returns: notifications consumed from queue (message, created_at)
+  - Use case: pull orchestrator push-when-idle events
+
+- read_pane_content
+  - Params: task_id, lines (default 50), project_id (required in global mode)
+  - Returns: task_id, session_name, content, lines_requested
+  - Use case: diagnose stuck agents by reading recent pane output
+
+- send_to_task
+  - Params: task_id, message, project_id (required in global mode)
+  - Returns: success flag and message
+  - Use case: nudge agents, answer prompts, or provide guidance
+  - Validation: only active phases (Planning/Running) allowed
+
+- Additional batch helpers
+  - Allowed actions computation: derived from plugin rules and dependency satisfaction.
+
+Notes:
+- In global mode, all CRUD tools require project_id; call list_projects first.
+- In project-scoped mode, project_id is ignored.
+
+**Section sources**
+- [server.rs:524-543](file://src/mcp/server.rs#L524-L543)
+- [server.rs:548-588](file://src/mcp/server.rs#L548-L588)
+- [server.rs:593-653](file://src/mcp/server.rs#L593-L653)
+- [server.rs:979-1018](file://src/mcp/server.rs#L979-L1018)
+- [server.rs:1023-1106](file://src/mcp/server.rs#L1023-L1106)
+- [server.rs:1111-1178](file://src/mcp/server.rs#L1111-L1178)
+- [server.rs:1183-1215](file://src/mcp/server.rs#L1183-L1215)
+- [server.rs:658-721](file://src/mcp/server.rs#L658-L721)
+- [server.rs:729-755](file://src/mcp/server.rs#L729-L755)
+- [server.rs:760-832](file://src/mcp/server.rs#L760-L832)
+- [server.rs:837-858](file://src/mcp/server.rs#L837-L858)
+- [server.rs:863-910](file://src/mcp/server.rs#L863-L910)
+- [server.rs:915-974](file://src/mcp/server.rs#L915-L974)
+- [server.rs:474-518](file://src/mcp/server.rs#L474-L518)
+- [CLAUDE.md:213-226](file://CLAUDE.md#L213-L226)
+
+### Notification System (Push-When-Idle)
+- Mechanism:
+  - TUI writes notifications to the project DB when orchestrator completes a phase.
+  - External agents call get_notifications to consume them.
+  - Notifications are atomic fetch-and-delete via RETURNING to preserve ordering.
+- Behavior:
+  - get_notifications consumes and returns ordered notifications.
+  - peek_notifications exists for inspection without consumption.
+- Orchestrator integration:
+  - Notifications are also pushed to the orchestrator’s tmux pane when idle, enabling reactive orchestration.
 
 ```mermaid
 flowchart TD
-Start(["Start 'agtx mcp-serve'"]) --> HasPath{"Path provided?"}
-HasPath --> |Yes| Validate["Validate git repo"]
-Validate --> OpenProj["Open project DB"]
-OpenProj --> ModeProj["ServerMode::Project(path)"]
-HasPath --> |No| OpenGlobal["Open global DB"]
-OpenGlobal --> ModeGlobal["ServerMode::Global"]
-ModeProj --> Serve["Serve tools over stdio"]
-ModeGlobal --> Serve
-Serve --> End(["Listening"])
+Start(["Phase Complete"]) --> Write["Write notification to DB"]
+Write --> Consume["Agent calls get_notifications"]
+Consume --> Delivered["Ordered notifications delivered"]
+Delivered --> Clear["DB queue cleared for those items"]
+Clear --> End(["Idle push also available"])
 ```
 
 **Diagram sources**
-- [src/main.rs:30-46](file://src/main.rs#L30-L46)
-- [src/mcp/server.rs:1245-1264](file://src/mcp/server.rs#L1245-L1264)
+- [schema.rs:598-654](file://src/db/schema.rs#L598-L654)
+- [server.rs:837-858](file://src/mcp/server.rs#L837-L858)
+- [README.md:638-646](file://README.md#L638-L646)
 
 **Section sources**
-- [src/main.rs:30-46](file://src/main.rs#L30-L46)
-- [src/mcp/server.rs:16-24](file://src/mcp/server.rs#L16-L24)
-- [src/mcp/server.rs:409-429](file://src/mcp/server.rs#L409-L429)
-- [src/mcp/server.rs:1245-1264](file://src/mcp/server.rs#L1245-L1264)
-
-### Tool Catalog and Behavior
-- list_projects: Lists all projects in the global index.
-- list_tasks: Lists tasks optionally filtered by status; in Global mode requires project_id.
-- get_task: Returns task details and allowed_actions computed from plugin rules and dependency satisfaction.
-- create_task: Creates a backlog task; validates referenced_tasks existence.
-- create_tasks_batch: Batch-create tasks with index-based dependencies; enforces no forward references and deduplicate indices.
-- update_task: Updates backlog task fields; validates referenced_tasks and status guard.
-- delete_task: Deletes a backlog task.
-- move_task: Queues a transition request; validates action and dependency gates for forward transitions.
-- get_transition_status: Checks completion or error of a transition request.
-- check_conflicts: Non-destructive conflict check against default branch for one task or all Review tasks.
-- get_notifications: Consumes and returns orchestrator notifications.
-- read_pane_content: Reads recent lines from a task’s tmux pane.
-- send_to_task: Sends a message to a task’s agent pane (Planning/Running only).
-
-```mermaid
-classDiagram
-class AgtxMcpServer {
-+mode : ServerMode
-+tool_router : ToolRouter
-+resolve_project_path(project_id) Result<PathBuf, String>
-+open_project_db_for(project_id) Result<Database, String>
-+open_global_db() Result<Database, String>
-+config_defaults_for(project_id) (String, Option<String>)
-+allowed_actions(task, deps_satisfied) Vec<String>
-}
-class ServerMode {
-<<enum>>
-+Project(PathBuf)
-+Global
-}
-class Task {
-+id : String
-+title : String
-+status : TaskStatus
-+agent : String
-+plugin : Option<String>
-+referenced_tasks : Option<String>
-+branch_name : Option<String>
-+session_name : Option<String>
-}
-class TransitionRequest {
-+id : String
-+task_id : String
-+action : String
-+reason : Option<String>
-+requested_at : DateTime
-+processed_at : Option<DateTime>
-+error : Option<String>
-}
-AgtxMcpServer --> ServerMode : "uses"
-AgtxMcpServer --> Task : "reads/writes"
-AgtxMcpServer --> TransitionRequest : "creates"
-```
-
-**Diagram sources**
-- [src/mcp/server.rs:395-519](file://src/mcp/server.rs#L395-L519)
-- [src/mcp/server.rs:16-24](file://src/mcp/server.rs#L16-L24)
-- [src/db/models.rs:58-184](file://src/db/models.rs#L58-L184)
-
-**Section sources**
-- [src/mcp/server.rs:521-1216](file://src/mcp/server.rs#L521-L1216)
-- [src/db/models.rs:58-184](file://src/db/models.rs#L58-L184)
-
-### Tool: move_task and Allowed Actions
-The orchestrator relies on allowed_actions to gate transitions. The server computes allowed actions based on task status and plugin rules, and blocks forward transitions when dependencies are unsatisfied.
-
-```mermaid
-flowchart TD
-Start(["move_task(action)"]) --> Validate["Validate action"]
-Validate --> Exists{"Task exists?"}
-Exists --> |No| ErrTask["Error: task not found"]
-Exists --> |Yes| CheckDeps{"Forward action from Backlog?"}
-CheckDeps --> |Yes| DepsOk{"Dependencies satisfied?"}
-DepsOk --> |No| Block["Block transition"]
-DepsOk --> |Yes| CreateReq["Create TransitionRequest"]
-CheckDeps --> |No| CreateReq
-CreateReq --> Done(["Return request_id"])
-ErrTask --> Done
-Block --> Done
-```
-
-**Diagram sources**
-- [src/mcp/server.rs:655-721](file://src/mcp/server.rs#L655-L721)
-- [src/mcp/server.rs:473-518](file://src/mcp/server.rs#L473-L518)
-
-**Section sources**
-- [src/mcp/server.rs:655-721](file://src/mcp/server.rs#L655-L721)
-- [src/mcp/server.rs:473-518](file://src/mcp/server.rs#L473-L518)
-
-### Tool: check_conflicts
-Checks merge conflicts against the default branch using a non-destructive virtual merge.
-
-```mermaid
-flowchart TD
-Start(["check_conflicts(task_id?, project_id?)"]) --> Resolve["Resolve project path"]
-Resolve --> DetectMain["Detect main branch"]
-DetectMain --> LoadTasks["Load tasks (single or Review)"]
-LoadTasks --> Loop{"For each task"}
-Loop --> |Branch set| MergeTree["git merge-tree HEAD origin/main"]
-MergeTree --> Result["Record has_conflicts + files"]
-Loop --> |No branch| Missing["Record error: no branch name"]
-Result --> Next["Next task"]
-Missing --> Next
-Next --> |More| Loop
-Next --> |Done| BuildResp["Build response"]
-BuildResp --> End(["Return JSON"])
-```
-
-**Diagram sources**
-- [src/mcp/server.rs:757-832](file://src/mcp/server.rs#L757-L832)
-- [src/git/operations.rs:211-243](file://src/git/operations.rs#L211-L243)
-
-**Section sources**
-- [src/mcp/server.rs:757-832](file://src/mcp/server.rs#L757-L832)
-- [src/git/operations.rs:211-243](file://src/git/operations.rs#L211-L243)
-
-### Tool: read_pane_content and send_to_task
-- read_pane_content: Captures pane content from tmux for diagnostics.
-- send_to_task: Sends keys to a tmux pane (Planning/Running only).
-
-```mermaid
-sequenceDiagram
-participant Agent as "Agent"
-participant MCP as "AgtxMcpServer"
-participant TMUX as "tmux"
-Agent->>MCP : "read_pane_content(task_id, lines?)"
-MCP->>TMUX : "capture-pane -t session -p -S -N"
-TMUX-->>MCP : "content"
-MCP-->>Agent : "JSON with content"
-Agent->>MCP : "send_to_task(task_id, message)"
-MCP->>TMUX : "send-keys message"
-MCP->>TMUX : "send-keys Enter"
-TMUX-->>MCP : "OK"
-MCP-->>Agent : "success"
-```
-
-**Diagram sources**
-- [src/mcp/server.rs:860-974](file://src/mcp/server.rs#L860-L974)
-- [src/tmux/operations.rs:166-136](file://src/tmux/operations.rs#L166-L136)
-
-**Section sources**
-- [src/mcp/server.rs:860-974](file://src/mcp/server.rs#L860-L974)
-- [src/tmux/operations.rs:166-136](file://src/tmux/operations.rs#L166-L136)
+- [schema.rs:598-654](file://src/db/schema.rs#L598-L654)
+- [server.rs:837-858](file://src/mcp/server.rs#L837-L858)
+- [README.md:638-646](file://README.md#L638-L646)
 
 ### Orchestrator Agent Integration
-The orchestrator uses MCP to:
-- Discover projects and tasks.
-- Query allowed_actions and queue transitions.
-- Monitor progress via notifications and pane content.
-- Nudge stuck agents or escalate to human attention.
+- Registration:
+  - Agents register the MCP server locally via platform-specific commands (e.g., claude mcp add-json).
+  - Cleanup occurs on exit to avoid stale registrations.
+- Workflow:
+  - Agent receives push-when-idle notifications when orchestrator is idle.
+  - Agent calls list_tasks/get_task to compute allowed_actions, then move_task to advance.
+  - For stuck tasks, agent reads pane content and optionally sends messages or escalates.
 
 ```mermaid
 sequenceDiagram
-participant Orchestrator as "Claude Code (Orchestrator)"
-participant MCP as "AgtxMcpServer"
-participant DB as "SQLite"
 participant TUI as "agtx TUI"
-participant TMUX as "tmux"
-Orchestrator->>MCP : "list_projects"
-Orchestrator->>MCP : "list_tasks(project_id)"
-Orchestrator->>MCP : "get_task(task_id)"
-Orchestrator->>MCP : "move_task(task_id, action)"
-MCP->>DB : "create_transition_request"
-TUI->>DB : "poll + execute transitions"
-Orchestrator->>MCP : "get_notifications"
-Orchestrator->>MCP : "read_pane_content(task_id)"
-Orchestrator->>MCP : "send_to_task(task_id, message)"
-Orchestrator->>MCP : "get_transition_status(request_id)"
+participant DB as "DB"
+participant Agent as "Orchestrator Agent"
+participant MCP as "AgtxMcpServer"
+TUI->>DB : "Create notification on phase completion"
+Agent->>MCP : "get_notifications()"
+MCP->>DB : "consume_notifications()"
+DB-->>MCP : "notifications"
+MCP-->>Agent : "notifications"
+Agent->>MCP : "list_tasks()/get_task()"
+MCP-->>Agent : "tasks + allowed_actions"
+Agent->>MCP : "move_task()"
+MCP-->>Agent : "request_id"
+Agent->>MCP : "get_transition_status()"
+MCP-->>Agent : "status"
+Agent->>MCP : "read_pane_content()/send_to_task()"
+MCP-->>Agent : "pane content / success"
 ```
 
 **Diagram sources**
-- [README.md:623-646](file://README.md#L623-L646)
-- [CLAUDE.md:191-214](file://CLAUDE.md#L191-L214)
-- [src/mcp/server.rs:521-1216](file://src/mcp/server.rs#L521-L1216)
+- [operations.rs:92-107](file://src/agent/operations.rs#L92-L107)
+- [server.rs:837-858](file://src/mcp/server.rs#L837-L858)
+- [server.rs:548-653](file://src/mcp/server.rs#L548-L653)
+- [server.rs:658-755](file://src/mcp/server.rs#L658-L755)
+- [server.rs:863-974](file://src/mcp/server.rs#L863-L974)
 
 **Section sources**
-- [README.md:623-646](file://README.md#L623-L646)
-- [CLAUDE.md:191-214](file://CLAUDE.md#L191-L214)
-- [src/mcp/server.rs:521-1216](file://src/mcp/server.rs#L521-L1216)
+- [operations.rs:92-107](file://src/agent/operations.rs#L92-L107)
+- [README.md:638-646](file://README.md#L638-L646)
+- [CLAUDE.md:205-213](file://CLAUDE.md#L205-L213)
+
+### Practical Examples
+
+- Listing tasks in a project:
+  - Global mode: call list_projects first to get project_id, then list_tasks with project_id.
+  - Project-scoped mode: call list_tasks without project_id.
+
+- Creating tasks:
+  - Single task: create_task with title and optional metadata.
+  - Batch with dependencies: create_tasks_batch with depends_on indices.
+
+- Advancing a task:
+  - get_task to see allowed_actions, then move_task with a valid action.
+
+- Diagnosing stuck tasks:
+  - read_pane_content to inspect recent output.
+  - send_to_task to nudge or answer prompts.
+  - escalate_to_user action to flag for human intervention.
+
+- Checking conflicts:
+  - check_conflicts for Review tasks or a specific task.
+
+- Consuming notifications:
+  - get_notifications to pull orchestrator events.
+
+**Section sources**
+- [server.rs:524-543](file://src/mcp/server.rs#L524-L543)
+- [server.rs:548-588](file://src/mcp/server.rs#L548-L588)
+- [server.rs:979-1018](file://src/mcp/server.rs#L979-L1018)
+- [server.rs:1023-1106](file://src/mcp/server.rs#L1023-L1106)
+- [server.rs:658-721](file://src/mcp/server.rs#L658-L721)
+- [server.rs:863-974](file://src/mcp/server.rs#L863-L974)
+- [server.rs:760-832](file://src/mcp/server.rs#L760-L832)
+- [server.rs:837-858](file://src/mcp/server.rs#L837-L858)
+
+### Error Handling Strategies
+- Parameter validation:
+  - Missing project_id in global mode returns explicit errors.
+  - Invalid status/action values return descriptive errors.
+- Existence checks:
+  - Task existence and referenced_tasks presence validated before mutation.
+- Dependency gating:
+  - Forward transitions from Backlog are blocked until dependencies are satisfied.
+- Database errors:
+  - All DB operations return descriptive errors; serialization errors are handled gracefully.
+- Transition lifecycle:
+  - get_transition_status distinguishes pending, completed, and error states.
+
+**Section sources**
+- [server.rs:413-429](file://src/mcp/server.rs#L413-L429)
+- [server.rs:551-555](file://src/mcp/server.rs#L551-L555)
+- [server.rs:679-698](file://src/mcp/server.rs#L679-L698)
+- [server.rs:729-755](file://src/mcp/server.rs#L729-L755)
+- [server.rs:990-997](file://src/mcp/server.rs#L990-L997)
+- [server.rs:1146-1153](file://src/mcp/server.rs#L1146-L1153)
+
+### Debugging Techniques
+- Enable verbose logging via platform-specific debug flags (e.g., agent logs).
+- Use read_pane_content to inspect agent output and identify stalls.
+- Use get_notifications to confirm orchestrator activity and timing.
+- Validate allowed_actions via get_task to ensure plugin rules are respected.
+- Test batch creation with depends_on indices to verify dependency resolution.
+
+**Section sources**
+- [server.rs:863-910](file://src/mcp/server.rs#L863-L910)
+- [server.rs:837-858](file://src/mcp/server.rs#L837-L858)
+- [server.rs:593-653](file://src/mcp/server.rs#L593-L653)
+- [server.rs:1023-1106](file://src/mcp/server.rs#L1023-L1106)
+
+### Security Considerations
+- Transport: JSON-RPC over stdio with no network exposure.
+- Authentication: No built-in authentication; rely on local process boundaries and controlled agent registration.
+- Permissions: MCP server runs with the privileges of the invoking user/process.
+- Recommendations:
+  - Restrict agent registration to trusted sessions.
+  - Avoid exposing the MCP server to untrusted environments.
+  - Monitor notifications and transition requests for unexpected activity.
+
+**Section sources**
+- [server.rs:1245-1263](file://src/mcp/server.rs#L1245-L1263)
+- [operations.rs:92-107](file://src/agent/operations.rs#L92-L107)
+
+### Integration Guidance for AI Coding Platforms
+- Registration:
+  - Use platform-specific MCP registration commands to bind to the stdio server.
+  - Clean up registrations on exit to prevent stale entries.
+- Supported agents:
+  - Claude Code, Codex, Gemini CLI, OpenCode, Cursor Agent, GitHub Copilot CLI.
+- Orchestration:
+  - Use list_tasks/get_task to discover and validate allowed_actions.
+  - Use move_task to advance tasks and get_transition_status to poll.
+  - Use read_pane_content/send_to_task for diagnostics and nudging.
+  - Use get_notifications for push-when-idle automation.
+
+**Section sources**
+- [operations.rs:92-107](file://src/agent/operations.rs#L92-L107)
+- [README.md:66-66](file://README.md#L66-L66)
+- [CLAUDE.md:205-213](file://CLAUDE.md#L205-L213)
 
 ## Dependency Analysis
-- CLI to MCP: The CLI parses arguments and invokes the MCP server with optional project path.
-- MCP to DB: Tools read/write tasks, projects, transition requests, and notifications.
-- MCP to tmux: Pane capture and key injection for agent interaction.
-- MCP to git: Conflict checks and worktree operations are indirectly used via plugin workflows.
+- External crates:
+  - rmcp: JSON-RPC over stdio, tool routing, schemas.
+  - tokio: async runtime for MCP service.
+- Internal dependencies:
+  - Database: project/global DB access, notifications, transition requests.
+  - Config: merged global and project defaults.
+  - tmux: pane capture/send for diagnostics and nudging.
 
 ```mermaid
 graph LR
-MAIN["src/main.rs"] --> SRV["src/mcp/server.rs"]
-SRV --> DBMOD["src/db/mod.rs"]
-DBMOD --> MODELS["src/db/models.rs"]
-SRV --> TMUX["src/tmux/operations.rs"]
-SRV --> GITOPS["src/git/operations.rs"]
+RMCP["rmcp (JSON-RPC stdio)"] --> SRV["AgtxMcpServer"]
+SRV --> DB["Database (project/global)"]
+SRV --> CFG["Config (Global/Project)"]
+SRV --> TMUX["tmux (pane ops)"]
 ```
 
 **Diagram sources**
-- [src/main.rs:30-46](file://src/main.rs#L30-L46)
-- [src/mcp/server.rs:1245-1264](file://src/mcp/server.rs#L1245-L1264)
-- [src/db/mod.rs:1-6](file://src/db/mod.rs#L1-L6)
-- [src/db/models.rs:58-184](file://src/db/models.rs#L58-L184)
-- [src/tmux/operations.rs:61-248](file://src/tmux/operations.rs#L61-L248)
-- [src/git/operations.rs:77-275](file://src/git/operations.rs#L77-L275)
+- [server.rs:4-11](file://src/mcp/server.rs#L4-L11)
+- [server.rs:13-14](file://src/mcp/server.rs#L13-L14)
 
 **Section sources**
-- [src/main.rs:30-46](file://src/main.rs#L30-L46)
-- [src/mcp/server.rs:1245-1264](file://src/mcp/server.rs#L1245-L1264)
-- [src/db/mod.rs:1-6](file://src/db/mod.rs#L1-L6)
-- [src/db/models.rs:58-184](file://src/db/models.rs#L58-L184)
-- [src/tmux/operations.rs:61-248](file://src/tmux/operations.rs#L61-L248)
-- [src/git/operations.rs:77-275](file://src/git/operations.rs#L77-L275)
+- [server.rs:4-11](file://src/mcp/server.rs#L4-L11)
+- [server.rs:13-14](file://src/mcp/server.rs#L13-L14)
 
 ## Performance Considerations
-- JSON serialization overhead: Responses are serialized to pretty JSON; consider compact mode for high-frequency calls.
-- Database queries: Batch operations (e.g., create_tasks_batch) use atomic transactions to reduce overhead and ensure consistency.
-- tmux operations: Pane capture and key injection are synchronous; batch frequent calls to minimize latency.
-- Conflict checks: Virtual merges are efficient; avoid repeated checks by caching results per task.
+- Tool responses are serialized JSON; keep payloads minimal.
+- Batch operations (create_tasks_batch) provide atomicity and reduce round trips.
+- Conflict checks and pane reads are lightweight; avoid excessive polling.
+- Transition requests are persisted and cleaned up periodically to prevent accumulation.
 
 [No sources needed since this section provides general guidance]
 
 ## Troubleshooting Guide
 Common issues and resolutions:
-- MCP connectivity
-  - Ensure the server is started in the correct mode and path.
-  - Verify the agent’s MCP registration points to the correct command and args.
-- Permission problems
-  - Confirm the user has permissions to start tmux sessions and git operations.
-  - Check that the tmux server “agtx” is accessible.
-- Debugging MCP communication
-  - Use verbose logging in the agent’s MCP client.
-  - Inspect the MCP server logs and error messages returned by tools.
-  - Validate project_id resolution in Global mode by calling list_projects first.
-- Task state and transitions
-  - Use get_task to check allowed_actions and blocking dependencies.
-  - Use get_transition_status to verify completion or errors.
-- Pane diagnostics
-  - Use read_pane_content to inspect agent output for stuck tasks.
-  - Use send_to_task to inject guidance or answers to prompts.
+- Missing project_id in global mode:
+  - Call list_projects first, then pass project_id to all CRUD tools.
+- Invalid action or status:
+  - Use get_task to check allowed_actions; ensure dependencies are satisfied for Backlog forward transitions.
+- Task not found:
+  - Verify task_id and project_id; ensure correct mode (global vs project-scoped).
+- Pane read failures:
+  - Confirm task has an active session; adjust lines parameter.
+- Transition stuck:
+  - Poll get_transition_status; escalate_to_user if needed; read pane content and send_to_task to nudge.
 
 **Section sources**
-- [README.md:573-603](file://README.md#L573-L603)
-- [CLAUDE.md:215-227](file://CLAUDE.md#L215-L227)
-- [src/mcp/server.rs:521-1216](file://src/mcp/server.rs#L521-L1216)
+- [server.rs:413-429](file://src/mcp/server.rs#L413-L429)
+- [server.rs:551-555](file://src/mcp/server.rs#L551-L555)
+- [server.rs:679-698](file://src/mcp/server.rs#L679-L698)
+- [server.rs:863-910](file://src/mcp/server.rs#L863-L910)
+- [server.rs:729-755](file://src/mcp/server.rs#L729-L755)
 
 ## Conclusion
-AGTX’s MCP server provides a robust, agent-friendly interface to manage a terminal-based kanban board. With two operational modes, a comprehensive toolset, and tight integration with tmux and git, it enables seamless automation and orchestration. The orchestrator agent leverages MCP to drive tasks forward, while external agents can integrate via standard MCP clients.
+The agtx MCP server provides a robust, spec-driven integration surface for external orchestration and AI coding platforms. With two operational modes, a comprehensive tool catalog, strict validation, and a push-when-idle notification system, it enables reliable automation while preserving safety and transparency. Proper use of list_projects, allowed_actions, and diagnostics ensures smooth integration across diverse AI agents.
 
 [No sources needed since this section summarizes without analyzing specific files]
 
 ## Appendices
 
-### MCP Server Modes and Tool Requirements
-- Global mode: All CRUD tools require project_id; call list_projects first.
-- Project-scoped mode: project_id is ignored; path is fixed at startup.
+### MCP Server Modes Reference
+- Global mode: all CRUD tools require project_id; call list_projects first.
+- Project-scoped mode: fixed project path; project_id ignored.
 
 **Section sources**
-- [README.md:577-584](file://README.md#L577-L584)
-- [CLAUDE.md:215-227](file://CLAUDE.md#L215-L227)
-- [src/mcp/server.rs:409-429](file://src/mcp/server.rs#L409-L429)
+- [CLAUDE.md:215-226](file://CLAUDE.md#L215-L226)
+- [server.rs:1245-1263](file://src/mcp/server.rs#L1245-L1263)
 
-### MCP Tool Reference
-- list_projects: List all projects indexed by agtx.
-- list_tasks: List tasks, optionally filtered by status.
-- get_task: Get task details and allowed_actions.
-- create_task: Create a backlog task.
-- create_tasks_batch: Batch-create tasks with index-based dependencies.
-- update_task: Modify a backlog task’s fields.
-- delete_task: Delete a backlog task.
-- move_task: Queue a phase transition.
-- get_transition_status: Check transition completion or error.
-- check_conflicts: Non-destructive merge conflict check.
-- get_notifications: Consume orchestrator notifications.
-- read_pane_content: Read recent pane lines.
-- send_to_task: Send a message to a task’s agent pane.
-
-**Section sources**
-- [README.md:586-602](file://README.md#L586-L602)
-- [CLAUDE.md:213-213](file://CLAUDE.md#L213-L213)
-- [src/mcp/server.rs:521-1216](file://src/mcp/server.rs#L521-L1216)
-
-### Agent Integration Examples
-- Claude Code: Register the MCP server with the orchestrator and use sweep/brainstorm skills.
-- Codex: Use the shared .mcp.json to register the server; integrate via marketplace.
-- Gemini CLI: Add the MCP server and include the sweep skill in context.
+### Tool Parameter and Return Types Summary
+- list_projects: no params; returns array of project summaries.
+- list_tasks: status (optional), project_id (required in global); returns array of task summaries.
+- get_task: task_id, project_id; returns task detail with allowed_actions.
+- create_task: title, description, plugin, referenced_tasks, base_branch, project_id; returns created id/status.
+- create_tasks_batch: tasks[] with depends_on; returns created tasks.
+- update_task: task_id + optional fields; returns updated fields list.
+- delete_task: task_id; returns confirmation.
+- move_task: task_id, action, reason (optional), project_id; returns request_id.
+- get_transition_status: request_id, project_id; returns status/error.
+- check_conflicts: task_id (optional), project_id; returns main_branch and per-task results.
+- get_notifications: project_id; returns notifications.
+- read_pane_content: task_id, lines (optional), project_id; returns content.
+- send_to_task: task_id, message, project_id; returns success.
 
 **Section sources**
-- [README.md:188-257](file://README.md#L188-L257)
-- [.mcp.json:1-8](file://.mcp.json#L1-L8)
+- [server.rs:524-543](file://src/mcp/server.rs#L524-L543)
+- [server.rs:548-588](file://src/mcp/server.rs#L548-L588)
+- [server.rs:593-653](file://src/mcp/server.rs#L593-L653)
+- [server.rs:979-1018](file://src/mcp/server.rs#L979-L1018)
+- [server.rs:1023-1106](file://src/mcp/server.rs#L1023-L1106)
+- [server.rs:1111-1178](file://src/mcp/server.rs#L1111-L1178)
+- [server.rs:1183-1215](file://src/mcp/server.rs#L1183-L1215)
+- [server.rs:658-721](file://src/mcp/server.rs#L658-L721)
+- [server.rs:729-755](file://src/mcp/server.rs#L729-L755)
+- [server.rs:760-832](file://src/mcp/server.rs#L760-L832)
+- [server.rs:837-858](file://src/mcp/server.rs#L837-L858)
+- [server.rs:863-910](file://src/mcp/server.rs#L863-L910)
+- [server.rs:915-974](file://src/mcp/server.rs#L915-L974)
 
-### Configuration and Security
-- Configuration: Global and project-level settings influence agent defaults and workflow behavior.
-- Security: MCP runs over stdio; ensure the environment restricts access to the process and that tmux sessions are isolated.
+### Tests Coverage Highlights
+- Transition requests lifecycle and cleanup.
+- Batch creation with dependency resolution and rollback.
+- Notifications peek/consume ordering.
+- Project upsert/update.
 
 **Section sources**
-- [README.md:261-328](file://README.md#L261-L328)
-- [src/config/mod.rs:230-303](file://src/config/mod.rs#L230-L303)
-
-### Best Practices
-- Use Global mode for broad tool access; use project-scoped mode for orchestrator binding.
-- Always validate project_id in Global mode via list_projects.
-- Use allowed_actions to gate transitions and prevent invalid state changes.
-- Employ read_pane_content and send_to_task for diagnostics and nudges.
-- Keep tasks in Backlog until dependencies are satisfied; rely on plugin rules for gating.
-
-**Section sources**
-- [src/mcp/server.rs:473-518](file://src/mcp/server.rs#L473-L518)
-- [src/mcp/server.rs:860-974](file://src/mcp/server.rs#L860-L974)
+- [mcp_tests.rs:5-150](file://tests/mcp_tests.rs#L5-L150)
+- [mcp_tests.rs:194-231](file://tests/mcp_tests.rs#L194-L231)
+- [mcp_tests.rs:391-436](file://tests/mcp_tests.rs#L391-L436)
+- [mcp_tests.rs:440-471](file://tests/mcp_tests.rs#L440-L471)

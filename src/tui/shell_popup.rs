@@ -1,6 +1,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+pub use crate::tui::app::FooterItem;
+
 /// State for the shell popup that shows a detached tmux window
 #[derive(Debug, Clone)]
 pub struct ShellPopup {
@@ -242,13 +244,16 @@ impl Default for ShellPopupColors {
 /// - Border with title
 /// - Header bar with task title
 /// - Content area with parsed terminal output
-/// - Footer with scroll status and keybindings
+/// - Footer with scroll status and keybindings (or interactive items when nav is active)
 pub fn render_shell_popup(
     popup: &ShellPopup,
     frame: &mut Frame,
     popup_area: Rect,
     styled_lines: Vec<Line<'_>>,
     colors: &ShellPopupColors,
+    footer_items: &[FooterItem],
+    footer_nav_active: bool,
+    footer_nav_index: usize,
 ) {
     frame.render_widget(Clear, popup_area);
 
@@ -312,14 +317,47 @@ pub fn render_shell_popup(
     let content = Paragraph::new(visible_lines);
     frame.render_widget(content, popup_chunks[2]);
 
-    // Footer with scroll indicator (pad to fill width)
-    let footer_text = build_footer_text(popup.scroll_offset, start_line);
-    let padded_footer = format!(
-        "{:<width$}",
-        footer_text,
-        width = popup_chunks[3].width as usize
-    );
-    let footer = Paragraph::new(padded_footer)
-        .style(Style::default().fg(colors.footer_fg).bg(colors.footer_bg));
-    frame.render_widget(footer, popup_chunks[3]);
+    // Footer: render interactive items when nav is active, otherwise plain text
+    if footer_nav_active && !footer_items.is_empty() {
+        // Render interactive footer items with highlight on selected item
+        let footer_area = popup_chunks[3];
+        let mut current_x = footer_area.x;
+
+        for (i, item) in footer_items.iter().enumerate() {
+            let is_selected = i == footer_nav_index;
+            let label = if is_selected {
+                // Highlight selected item with inverse colors
+                format!(">{}<", item.label)
+            } else {
+                item.label.clone()
+            };
+
+            let item_style = if is_selected {
+                Style::default()
+                    .fg(colors.footer_bg)
+                    .bg(colors.footer_fg)
+            } else {
+                Style::default().fg(colors.footer_fg).bg(colors.footer_bg)
+            };
+
+            let item_para = Paragraph::new(label.as_str())
+                .style(item_style)
+                .alignment(Alignment::Left);
+            let item_width = item.label.len() as u16 + 2; // +2 for >< markers
+            let item_area = Rect::new(current_x, footer_area.y, item_width, footer_area.height);
+            frame.render_widget(item_para, item_area);
+            current_x += item_width;
+        }
+    } else {
+        // Footer with scroll indicator (pad to fill width)
+        let footer_text = build_footer_text(popup.scroll_offset, start_line);
+        let padded_footer = format!(
+            "{:<width$}",
+            footer_text,
+            width = popup_chunks[3].width as usize
+        );
+        let footer = Paragraph::new(padded_footer)
+            .style(Style::default().fg(colors.footer_fg).bg(colors.footer_bg));
+        frame.render_widget(footer, popup_chunks[3]);
+    }
 }

@@ -4,18 +4,19 @@
 **Referenced Files in This Document**
 - [src/main.rs](file://src/main.rs)
 - [src/lib.rs](file://src/lib.rs)
+- [src/agent/mod.rs](file://src/agent/mod.rs)
+- [src/agent/operations.rs](file://src/agent/operations.rs)
+- [plugins/agtx/skills/orchestrate.md](file://plugins/agtx/skills/orchestrate.md)
+- [src/config/mod.rs](file://src/config/mod.rs)
+- [src/db/mod.rs](file://src/db/mod.rs)
+- [src/db/models.rs](file://src/db/models.rs)
+- [src/db/schema.rs](file://src/db/schema.rs)
+- [src/mcp/mod.rs](file://src/mcp/mod.rs)
 - [src/tui/app.rs](file://src/tui/app.rs)
 - [src/tui/board.rs](file://src/tui/board.rs)
-- [src/mcp/server.rs](file://src/mcp/server.rs)
-- [src/git/operations.rs](file://src/git/operations.rs)
-- [src/git/mod.rs](file://src/git/mod.rs)
-- [src/tmux/mod.rs](file://src/tmux/mod.rs)
-- [src/db/models.rs](file://src/db/models.rs)
-- [plugins/agtx/plugin.toml](file://plugins/agtx/plugin.toml)
-- [plugins/agtx/skills/orchestrate.md](file://plugins/agtx/skills/orchestrate.md)
-- [plugins/agtx/skills/merge-conflicts.md](file://plugins/agtx/skills/merge-conflicts.md)
-- [plugins/agent-skills/plugin.toml](file://plugins/agent-skills/plugin.toml)
+- [README.md](file://README.md)
 - [CLAUDE.md](file://CLAUDE.md)
+- [tests/db_tests.rs](file://tests/db_tests.rs)
 </cite>
 
 ## Table of Contents
@@ -31,339 +32,439 @@
 10. [Appendices](#appendices)
 
 ## Introduction
-This document focuses on AGTX’s advanced features for power users and complex workflows. It covers:
-- The experimental orchestrator agent that autonomously manages the kanban board, monitors progress, advances phases, and handles stuck tasks.
-- The merge conflict detection and resolution system using non-destructive virtual merges.
-- Dashboard mode for managing multiple projects simultaneously.
-- Advanced tmux integration for agent sessions and pane management.
-- Practical examples of multi-milestone cycles, custom plugin configurations, and advanced agent coordination patterns.
-- Performance optimization techniques for many concurrent tasks and agents.
-- Troubleshooting strategies for orchestrator debugging, MCP server issues, and complex Git conflict resolution.
-- Guidance for extending AGTX through custom plugins and agent integrations.
+This document focuses on advanced features and expert-level usage patterns in the system. It covers the orchestrator agent’s automated task advancement, conflict detection, and intelligent escalation to human intervention. It documents experimental mode configuration, safety considerations for automated workflows, performance optimization techniques, advanced troubleshooting methodologies, extensibility points for custom integrations, expert-level configuration scenarios, security hardening, enterprise deployment considerations, and monitoring/observability features for production environments.
 
 ## Project Structure
-AGTX organizes functionality into cohesive modules:
-- CLI entrypoint and modes (dashboard vs project).
-- TUI for kanban board, sidebar, and project dashboards.
-- MCP server for orchestrator tooling and cross-project operations.
-- Git operations for worktrees, diffs, and non-destructive conflict checks.
-- tmux integration for agent sessions and pane capture/send.
-- Database models for tasks, transitions, and notifications.
-- Plugins for built-in skills and external agent skills.
+At a high level, the system is organized around:
+- CLI entrypoint and feature flags
+- Agent abstraction and orchestrator command building
+- MCP server and TUI orchestration
+- Database-backed state for tasks, transitions, and notifications
+- Configuration model supporting per-phase agent overrides and workflow plugins
+- Plugins for specialized workflows and agent skills
 
 ```mermaid
 graph TB
-CLI["CLI Entry (src/main.rs)"] --> Mode["AppMode (src/lib.rs)"]
-Mode --> TUI["TUI App (src/tui/app.rs)"]
-TUI --> MCP["MCP Server (src/mcp/server.rs)"]
-TUI --> GitOps["Git Ops (src/git/operations.rs)"]
-TUI --> TmuxOps["tmux (src/tmux/mod.rs)"]
-TUI --> DB["Models (src/db/models.rs)"]
-TUI --> Plugins["Plugins (plugins/agtx/*)"]
-MCP --> Plugins
-GitOps --> MCP
-TmuxOps --> TUI
+A["CLI Entry<br/>src/main.rs"] --> B["App Initialization<br/>src/tui/app.rs"]
+A --> C["Feature Flags<br/>src/lib.rs"]
+B --> D["Agent Registry<br/>src/agent/operations.rs"]
+D --> E["Agent Ops Trait<br/>src/agent/operations.rs"]
+B --> F["MCP Serve<br/>src/mcp/mod.rs"]
+B --> G["Database Schema & Models<br/>src/db/schema.rs<br/>src/db/models.rs"]
+B --> H["Config Model<br/>src/config/mod.rs"]
+I["Orchestrator Skill<br/>plugins/agtx/skills/orchestrate.md"] --> F
+I --> G
 ```
 
 **Diagram sources**
 - [src/main.rs:16-96](file://src/main.rs#L16-L96)
-- [src/lib.rs:12-24](file://src/lib.rs#L12-L24)
-- [src/tui/app.rs:539-750](file://src/tui/app.rs#L539-L750)
-- [src/mcp/server.rs:395-520](file://src/mcp/server.rs#L395-L520)
-- [src/git/operations.rs:10-75](file://src/git/operations.rs#L10-L75)
-- [src/tmux/mod.rs:11-189](file://src/tmux/mod.rs#L11-L189)
+- [src/lib.rs:12-23](file://src/lib.rs#L12-L23)
+- [src/agent/operations.rs:110-163](file://src/agent/operations.rs#L110-L163)
+- [src/mcp/mod.rs:1-5](file://src/mcp/mod.rs#L1-L5)
+- [src/db/schema.rs:97-208](file://src/db/schema.rs#L97-L208)
 - [src/db/models.rs:58-133](file://src/db/models.rs#L58-L133)
-- [plugins/agtx/plugin.toml:1-16](file://plugins/agtx/plugin.toml#L1-L16)
+- [src/config/mod.rs:337-408](file://src/config/mod.rs#L337-L408)
+- [plugins/agtx/skills/orchestrate.md:1-200](file://plugins/agtx/skills/orchestrate.md#L1-L200)
 
 **Section sources**
 - [src/main.rs:16-96](file://src/main.rs#L16-L96)
-- [src/lib.rs:12-24](file://src/lib.rs#L12-L24)
-- [src/tui/app.rs:539-750](file://src/tui/app.rs#L539-L750)
-- [src/mcp/server.rs:395-520](file://src/mcp/server.rs#L395-L520)
-- [src/git/operations.rs:10-75](file://src/git/operations.rs#L10-L75)
-- [src/tmux/mod.rs:11-189](file://src/tmux/mod.rs#L11-L189)
+- [src/lib.rs:12-23](file://src/lib.rs#L12-L23)
+- [src/agent/operations.rs:110-163](file://src/agent/operations.rs#L110-L163)
+- [src/mcp/mod.rs:1-5](file://src/mcp/mod.rs#L1-L5)
+- [src/db/schema.rs:97-208](file://src/db/schema.rs#L97-L208)
 - [src/db/models.rs:58-133](file://src/db/models.rs#L58-L133)
-- [plugins/agtx/plugin.toml:1-16](file://plugins/agtx/plugin.toml#L1-L16)
+- [src/config/mod.rs:337-408](file://src/config/mod.rs#L337-L408)
+- [plugins/agtx/skills/orchestrate.md:1-200](file://plugins/agtx/skills/orchestrate.md#L1-L200)
 
 ## Core Components
-- AppMode and FeatureFlags: Control CLI mode and enable experimental features like the orchestrator agent.
-- TUI App: Renders the kanban board, dashboard, and manages tmux sessions, Git operations, and orchestrator integration.
-- MCP Server: Provides tools for listing/listening to tasks, moving tasks, checking conflicts, and orchestrator notifications.
-- Git Operations: Worktree management and non-destructive conflict checks using virtual merges.
-- tmux Integration: Spawning, capturing panes, sending keys, attaching sessions, and session lifecycle.
-- Database Models: Task lifecycle, transition requests, notifications, and agent session tracking.
+- Experimental mode: toggled via CLI flag and propagated as a feature flag to the TUI and downstream components.
+- Agent orchestration: builds agent-specific orchestrator commands and integrates with MCP for registration and lifecycle cleanup.
+- MCP server: project-scoped and global modes; orchestrator communicates via notifications and transition requests.
+- Database: centralizes task state, transition requests, and notifications with atomic operations for concurrency.
+- Configuration: merges global and project-level settings, supports per-phase agent overrides and workflow plugins.
 
 **Section sources**
-- [src/lib.rs:12-24](file://src/lib.rs#L12-L24)
-- [src/tui/app.rs:539-750](file://src/tui/app.rs#L539-L750)
-- [src/mcp/server.rs:395-520](file://src/mcp/server.rs#L395-L520)
-- [src/git/operations.rs:10-75](file://src/git/operations.rs#L10-L75)
-- [src/tmux/mod.rs:11-189](file://src/tmux/mod.rs#L11-L189)
-- [src/db/models.rs:58-133](file://src/db/models.rs#L58-L133)
+- [src/main.rs:21-61](file://src/main.rs#L21-L61)
+- [src/lib.rs:18-23](file://src/lib.rs#L18-L23)
+- [src/agent/operations.rs:92-107](file://src/agent/operations.rs#L92-L107)
+- [src/mcp/mod.rs:1-5](file://src/mcp/mod.rs#L1-L5)
+- [src/db/schema.rs:478-554](file://src/db/schema.rs#L478-L554)
+- [src/config/mod.rs:355-408](file://src/config/mod.rs#L355-L408)
 
 ## Architecture Overview
-The orchestrator agent operates as a push-notification-driven MCP client integrated with the TUI. The TUI detects task phase changes and writes notifications to the database. The orchestrator reads these notifications via MCP tools and advances tasks accordingly. tmux captures pane content to diagnose stuck agents, and Git operations support non-destructive conflict checks.
+The orchestrator agent operates as a coordinator between the TUI and agent sessions. It advances tasks through Planning and Running phases, monitors completion, escalates when needed, and coordinates multiple agents in parallel. MCP provides a bidirectional communication channel with the orchestrator agent, and the TUI persists state in a centralized database.
 
 ```mermaid
 sequenceDiagram
 participant User as "User"
-participant TUI as "TUI App"
-participant DB as "Database"
-participant MCP as "MCP Server"
-participant Orchestrator as "Orchestrator Agent"
-participant TMUX as "tmux"
-participant Git as "Git Ops"
-User->>TUI : "Move task to Planning/Running"
-TUI->>DB : "Write Notification"
-DB-->>MCP : "Push notification"
-MCP-->>Orchestrator : "Notify phase completion"
-Orchestrator->>MCP : "get_task + allowed_actions"
-Orchestrator->>MCP : "move_task(move_forward)"
-TUI->>TMUX : "Spawn/attach agent session"
-TMUX-->>TUI : "Pane content"
-Orchestrator->>MCP : "read_pane_content(task_id)"
-Orchestrator->>MCP : "send_to_task(task_id, message)"
-Orchestrator-->>MCP : "[agtx : idle]"
-Note over TUI,Git : "Background : check_conflicts uses non-destructive merge-tree"
+participant TUI as "TUI App<br/>src/tui/app.rs"
+participant DB as "Database<br/>src/db/schema.rs"
+participant MCP as "MCP Server<br/>src/mcp/mod.rs"
+participant Orchestrator as "Orchestrator Agent<br/>plugins/agtx/skills/orchestrate.md"
+participant Agent as "Coding Agent"
+User->>TUI : "Create/advance tasks"
+TUI->>DB : "Persist task state"
+TUI->>MCP : "Register orchestrator (project-scoped/global)"
+MCP-->>Orchestrator : "Push notifications on phase completion"
+Orchestrator->>DB : "List/Get tasks, check allowed_actions"
+Orchestrator->>TUI : "Queue transition_request (move_task)"
+TUI->>DB : "Claim/Process transition_request"
+TUI->>Agent : "Execute side effects (switch agent, run skill, send prompts)"
+Agent-->>TUI : "Agent pane output"
+Orchestrator->>DB : "Read pane content, decide escalation"
+Orchestrator->>TUI : "Escalate_to_user with reason"
+TUI->>DB : "Mark task escalation_note"
+Orchestrator->>MCP : "Send idle signal"
+TUI->>MCP : "Cleanup registration on exit"
 ```
 
 **Diagram sources**
-- [src/tui/app.rs:677-1032](file://src/tui/app.rs#L677-L1032)
-- [src/mcp/server.rs:521-755](file://src/mcp/server.rs#L521-L755)
-- [src/git/operations.rs:211-243](file://src/git/operations.rs#L211-L243)
-- [src/tmux/mod.rs:97-118](file://src/tmux/mod.rs#L97-L118)
+- [src/tui/app.rs:545-559](file://src/tui/app.rs#L545-L559)
+- [src/db/schema.rs:478-554](file://src/db/schema.rs#L478-L554)
+- [src/mcp/mod.rs:1-5](file://src/mcp/mod.rs#L1-L5)
 - [plugins/agtx/skills/orchestrate.md:30-90](file://plugins/agtx/skills/orchestrate.md#L30-L90)
+- [src/agent/operations.rs:92-107](file://src/agent/operations.rs#L92-L107)
+
+**Section sources**
+- [src/tui/app.rs:545-559](file://src/tui/app.rs#L545-L559)
+- [src/db/schema.rs:478-554](file://src/db/schema.rs#L478-L554)
+- [src/mcp/mod.rs:1-5](file://src/mcp/mod.rs#L1-L5)
+- [plugins/agtx/skills/orchestrate.md:30-90](file://plugins/agtx/skills/orchestrate.md#L30-L90)
+- [src/agent/operations.rs:92-107](file://src/agent/operations.rs#L92-L107)
 
 ## Detailed Component Analysis
 
-### Experimental Orchestrator Agent
-The orchestrator agent skill defines a push-notification-driven workflow:
-- Receives notifications when tasks complete a phase.
-- Queries task details and allowed actions.
-- Advances tasks using move_task with move_forward.
-- Handles stuck tasks by reading pane content and sending targeted inputs or escalating to the user.
+### Orchestrator Agent Functionality
+The orchestrator skill defines the operational contract for automated task advancement:
+- Receives push notifications when a phase completes.
+- Queries task details and allowed actions before advancing.
+- Moves tasks forward from Planning to Running, and from Running to Review.
+- Handles stuck tasks by reading pane content, applying decision rules, and escalating to the user when appropriate.
+- Emits an idle marker to receive the next notification.
 
 ```mermaid
 flowchart TD
-Start(["On startup"]) --> List["list_tasks()"]
-List --> Wait["Wait for notifications"]
-Wait --> Notify{"Notification received?"}
-Notify --> |No| Wait
-Notify --> |Yes| GetTask["get_task(task_id)"]
-GetTask --> Allowed{"allowed_actions contains 'move_forward'?"}
-Allowed --> |Yes| Move["move_task(move_forward)"]
-Allowed --> |No| Escalate["escalate_to_user(reason)"]
-Move --> Wait
-Escalate --> Wait
+Start(["On startup"]) --> ListTasks["List tasks"]
+ListTasks --> IdleWait["Wait for phase completion notifications"]
+IdleWait --> Notify{"Notification received?"}
+Notify --> |No| IdleWait
+Notify --> |Yes| GetTask["Get task and allowed_actions"]
+GetTask --> Action{"Allowed action?"}
+Action --> |move_forward| Advance["Advance task to next phase"]
+Action --> |escalate_to_user| Escalate["Flag task for user attention"]
+Advance --> IdleWait
+Escalate --> IdleWait
 ```
 
 **Diagram sources**
 - [plugins/agtx/skills/orchestrate.md:57-90](file://plugins/agtx/skills/orchestrate.md#L57-L90)
-- [src/mcp/server.rs:590-653](file://src/mcp/server.rs#L590-L653)
-- [src/mcp/server.rs:655-721](file://src/mcp/server.rs#L655-L721)
+- [plugins/agtx/skills/orchestrate.md:91-200](file://plugins/agtx/skills/orchestrate.md#L91-L200)
 
 **Section sources**
-- [plugins/agtx/skills/orchestrate.md:6-90](file://plugins/agtx/skills/orchestrate.md#L6-L90)
-- [src/mcp/server.rs:521-755](file://src/mcp/server.rs#L521-L755)
-- [src/tui/app.rs:677-1032](file://src/tui/app.rs#L677-L1032)
+- [plugins/agtx/skills/orchestrate.md:57-90](file://plugins/agtx/skills/orchestrate.md#L57-L90)
+- [plugins/agtx/skills/orchestrate.md:91-200](file://plugins/agtx/skills/orchestrate.md#L91-L200)
 
-### Merge Conflict Detection and Resolution
-AGTX performs non-destructive conflict checks using virtual merges:
-- fetch_and_check_conflicts runs a virtual merge and reports conflicts without modifying the working tree.
-- MCP tool check_conflicts integrates with the TUI to scan Review tasks for conflicts.
-- The merge-conflicts skill provides a deterministic, safe resolution recipe.
+### Experimental Mode Configuration and Safety
+- Experimental mode is enabled via a CLI flag and stored in feature flags. It is propagated to the TUI initialization and can gate advanced behaviors.
+- Safety considerations:
+  - MCP registration is scoped locally and cleaned up on exit to avoid lingering registrations.
+  - The orchestrator only advances tasks based on allowed_actions and does not inspect agent output.
+  - Escalation to user is explicit with a reason captured in the task record.
 
 ```mermaid
 flowchart TD
-A["Start Review task"] --> B["check_conflicts(task_id)"]
-B --> C{"has_conflicts?"}
-C --> |No| D["Proceed to move_to_done"]
-C --> |Yes| E["Open task pane and diff"]
-E --> F["Commit staged changes (if any)"]
-F --> G["Fetch origin and merge default branch"]
-G --> H["Resolve conflicts manually"]
-H --> I["Stage and commit resolution"]
-I --> J["Review conflicted files"]
-J --> K["Run tests and fix issues"]
-K --> L["Proceed to move_to_done"]
+CLI["Parse --experimental"] --> Flags["FeatureFlags.experimental = true"]
+Flags --> TUIInit["Initialize TUI with flags"]
+TUIInit --> MCPReg["Register orchestrator via MCP (scoped)"]
+MCPReg --> Cleanup["Unregister on exit"]
 ```
 
 **Diagram sources**
-- [src/git/operations.rs:211-243](file://src/git/operations.rs#L211-L243)
-- [src/mcp/server.rs:757-827](file://src/mcp/server.rs#L757-L827)
-- [plugins/agtx/skills/merge-conflicts.md:10-53](file://plugins/agtx/skills/merge-conflicts.md#L10-L53)
+- [src/main.rs:21-61](file://src/main.rs#L21-L61)
+- [src/agent/operations.rs:92-107](file://src/agent/operations.rs#L92-L107)
+- [plugins/agtx/skills/orchestrate.md:80-90](file://plugins/agtx/skills/orchestrate.md#L80-L90)
 
 **Section sources**
-- [src/git/operations.rs:211-243](file://src/git/operations.rs#L211-L243)
-- [src/mcp/server.rs:757-827](file://src/mcp/server.rs#L757-L827)
-- [plugins/agtx/skills/merge-conflicts.md:6-53](file://plugins/agtx/skills/merge-conflicts.md#L6-L53)
+- [src/main.rs:21-61](file://src/main.rs#L21-L61)
+- [src/agent/operations.rs:92-107](file://src/agent/operations.rs#L92-L107)
+- [plugins/agtx/skills/orchestrate.md:80-90](file://plugins/agtx/skills/orchestrate.md#L80-L90)
 
-### Dashboard Mode for Multi-Project Management
-Dashboard mode allows switching between projects and viewing multiple kanban boards:
-- AppMode::Dashboard enables project switching and global project indexing.
-- The TUI renders a compact dashboard layout and project list.
-- tmux sessions are scoped per project for isolation.
+### Conflict Detection and Intelligent Escalation
+- Conflict detection is integrated into the MCP tools and database-backed state:
+  - The TUI tracks task dependencies and ensures prerequisites are met before allowing transitions.
+  - The orchestrator reads pane content to detect repeated errors or loops and escalates after a second idle notification.
+  - Escalation reasons are persisted on the task record for visibility in the UI.
 
 ```mermaid
-graph TB
-Dash["Dashboard Mode"] --> ProjList["Project List"]
-ProjList --> Board["Kanban Board"]
-Board --> Tmux["tmux Project Session"]
-Dash --> MCP["MCP Global Mode"]
+flowchart TD
+Detect["Detect idle or repeated error"] --> ReadPane["Read pane content"]
+ReadPane --> Classify{"Decision rule classification"}
+Classify --> |Confirmation prompt| Send["Send keystroke via send_to_task"]
+Classify --> |Numbered menu| Decide["Select recommended or escalate"]
+Classify --> |Domain question| Escalate["escalate_to_user with reason"]
+Classify --> |Loop/error| Nudge["Nudge agent once, then escalate if idle again"]
+Send --> ReadPane
+Decide --> ReadPane
+Escalate --> Persist["Persist escalation_note"]
+Nudge --> ReadPane
 ```
 
 **Diagram sources**
-- [src/lib.rs:12-24](file://src/lib.rs#L12-L24)
-- [src/tui/app.rs:990-1032](file://src/tui/app.rs#L990-L1032)
-- [CLAUDE.md:162-182](file://CLAUDE.md#L162-L182)
+- [plugins/agtx/skills/orchestrate.md:91-200](file://plugins/agtx/skills/orchestrate.md#L91-L200)
+- [src/db/schema.rs:387-400](file://src/db/schema.rs#L387-L400)
 
 **Section sources**
-- [src/lib.rs:12-24](file://src/lib.rs#L12-L24)
-- [src/tui/app.rs:990-1032](file://src/tui/app.rs#L990-L1032)
-- [CLAUDE.md:162-182](file://CLAUDE.md#L162-L182)
+- [plugins/agtx/skills/orchestrate.md:91-200](file://plugins/agtx/skills/orchestrate.md#L91-L200)
+- [src/db/schema.rs:387-400](file://src/db/schema.rs#L387-L400)
 
-### Advanced tmux Integration
-tmux integration supports:
-- Spawning agent sessions with sanitized names.
-- Capturing pane content for idle detection and stuck-task diagnosis.
-- Sending keys to agent panes to resolve prompts.
-- Attaching to sessions for interactive debugging.
-- Session lifecycle management and recovery.
+### MCP Server Modes and Communication
+- Two MCP server modes:
+  - Project-scoped: bound to a specific project path.
+  - Global: used for ad-hoc sessions and skills.
+- Communication channels:
+  - Orchestrator → TUI: transition_requests table for commands.
+  - TUI → Orchestrator: notifications table, pushed via agent pane when idle.
+- Registration/cleanup:
+  - Local MCP registration with cleanup on exit.
 
 ```mermaid
 classDiagram
-class TmuxOperations {
-+spawn_session(session_name, working_dir, agent_command, args) Result
-+list_sessions() Result~Vec~
-+session_exists(session_name) Result~bool~
-+capture_pane(session_name, lines) Result~String~
-+send_keys(session_name, keys) Result
-+attach_session(session_name) Result
-+kill_session(session_name) Result
-+safe_session_name(name) String
+class ServerMode {
++Project
++Global
 }
+class MCPTools {
++list_tasks()
++get_task()
++move_task()
++get_transition_status()
++check_conflicts()
++get_notifications()
+}
+class Database {
++transition_requests
++notifications
+}
+ServerMode <.. MCPTools : "mode affects tool usage"
+MCPTools --> Database : "reads/writes"
 ```
 
 **Diagram sources**
-- [src/tmux/mod.rs:14-189](file://src/tmux/mod.rs#L14-L189)
+- [CLAUDE.md:215-226](file://CLAUDE.md#L215-L226)
+- [src/db/schema.rs:478-654](file://src/db/schema.rs#L478-L654)
 
 **Section sources**
-- [src/tmux/mod.rs:14-189](file://src/tmux/mod.rs#L14-L189)
-- [src/tui/app.rs:677-1032](file://src/tui/app.rs#L677-L1032)
+- [CLAUDE.md:215-226](file://CLAUDE.md#L215-L226)
+- [src/db/schema.rs:478-654](file://src/db/schema.rs#L478-L654)
 
-### Practical Examples
+### Configuration and Extensibility
+- Merged configuration supports:
+  - Per-phase agent overrides.
+  - Worktree settings and scripts.
+  - Theme and UI preferences.
+  - Workflow plugin configuration with commands, prompts, prompt triggers, auto-dismiss rules, and copy-back artifacts.
+- Extensibility points:
+  - Add new agents via the agent registry and agent operations trait.
+  - Extend MCP tools and skills through plugins and workflow definitions.
+  - Customize per-phase agent selection and lifecycle behaviors.
 
-#### Multi-Milestone Cycles
-- Use referenced_tasks to chain tasks across milestones.
-- Configure a workflow plugin to enforce milestone gating and allowed_actions.
-- The orchestrator advances tasks only when dependencies are satisfied.
+```mermaid
+classDiagram
+class GlobalConfig {
++default_agent
++agents
++worktree
++theme
+}
+class ProjectConfig {
++default_agent?
++agents?
++base_branch?
++worktree_dir?
++copy_files?
++init_script?
++cleanup_script?
++workflow_plugin?
+}
+class MergedConfig {
++merge()
++agent_for_phase()
+}
+class WorkflowPlugin {
++supported_agents
++commands
++prompts
++prompt_triggers
++auto_dismiss
++copy_back
+}
+GlobalConfig --> MergedConfig : "merge()"
+ProjectConfig --> MergedConfig : "merge()"
+MergedConfig --> WorkflowPlugin : "workflow_plugin"
+```
+
+**Diagram sources**
+- [src/config/mod.rs:337-408](file://src/config/mod.rs#L337-L408)
+- [src/config/mod.rs:410-594](file://src/config/mod.rs#L410-L594)
 
 **Section sources**
-- [src/mcp/server.rs:473-518](file://src/mcp/server.rs#L473-L518)
-- [src/db/models.rs:58-133](file://src/db/models.rs#L58-L133)
+- [src/config/mod.rs:337-408](file://src/config/mod.rs#L337-L408)
+- [src/config/mod.rs:410-594](file://src/config/mod.rs#L410-L594)
 
-#### Custom Plugin Configurations
-- Define plugin commands and artifacts in plugin.toml.
-- Use bundled plugins like agent-skills for production-grade skills.
+### Database Design and Concurrency
+- Centralized state:
+  - Tasks, projects, running agents, transition requests, and notifications.
+  - Indexes on status and project for efficient queries.
+- Atomic operations:
+  - Pending transition request claiming with optimistic concurrency.
+  - Atomic notification consumption via RETURNING to prevent duplicates under concurrent consumers.
+
+```mermaid
+erDiagram
+TASKS {
+string id PK
+string title
+text description
+string status
+string agent
+string project_id
+string session_name
+string worktree_path
+string branch_name
+int pr_number
+string pr_url
+string plugin
+datetime created_at
+datetime updated_at
+}
+TRANSITION_REQUESTS {
+string id PK
+string task_id FK
+string action
+string reason
+datetime requested_at
+datetime processed_at
+string error
+string claimed_by
+}
+NOTIFICATIONS {
+string id PK
+string message
+datetime created_at
+}
+RUNNING_AGENTS {
+string session_name PK
+string project_id FK
+string task_id
+string agent_name
+datetime started_at
+string status
+}
+TASKS ||--o{ TRANSITION_REQUESTS : "queued"
+PROJECTS ||--o{ TASKS : "owns"
+RUNNING_AGENTS }o--|| TASKS : "runs"
+```
+
+**Diagram sources**
+- [src/db/schema.rs:97-208](file://src/db/schema.rs#L97-L208)
+- [src/db/schema.rs:478-654](file://src/db/schema.rs#L478-L654)
+- [src/db/models.rs:58-245](file://src/db/models.rs#L58-L245)
 
 **Section sources**
-- [plugins/agtx/plugin.toml:1-16](file://plugins/agtx/plugin.toml#L1-L16)
-- [plugins/agent-skills/plugin.toml:1-19](file://plugins/agent-skills/plugin.toml#L1-L19)
-
-#### Advanced Agent Coordination Patterns
-- Use MCP tools to coordinate multiple agents across Planning and Running.
-- Employ read_pane_content and send_to_task to resolve interactive prompts.
-- Use escalate_to_user for domain decisions requiring human judgment.
-
-**Section sources**
-- [plugins/agtx/skills/orchestrate.md:14-100](file://plugins/agtx/skills/orchestrate.md#L14-L100)
-- [src/mcp/server.rs:590-653](file://src/mcp/server.rs#L590-L653)
+- [src/db/schema.rs:97-208](file://src/db/schema.rs#L97-L208)
+- [src/db/schema.rs:478-654](file://src/db/schema.rs#L478-L654)
+- [src/db/models.rs:58-245](file://src/db/models.rs#L58-L245)
 
 ## Dependency Analysis
-The orchestrator relies on:
-- MCP tools for task state queries and transitions.
-- tmux for agent pane inspection and input injection.
-- Git operations for non-destructive conflict checks.
-- Database models for notifications and transition requests.
+- CLI depends on feature flags and initializes the TUI.
+- TUI depends on agent registry, database, MCP server, and configuration.
+- Agent operations depend on agent metadata and build orchestrator commands.
+- MCP server interacts with the database for notifications and transition requests.
 
 ```mermaid
 graph LR
-Orchestrator["Orchestrator Skill"] --> MCP["MCP Tools"]
-MCP --> DB["Task/Transition/Notification Models"]
-MCP --> GitOps["Git Ops"]
-MCP --> TmuxOps["tmux"]
-TUI["TUI App"] --> DB
-TUI --> TmuxOps
-TUI --> GitOps
+CLI["src/main.rs"] --> Flags["src/lib.rs"]
+CLI --> TUI["src/tui/app.rs"]
+TUI --> AgentOps["src/agent/operations.rs"]
+TUI --> DB["src/db/schema.rs"]
+TUI --> MCP["src/mcp/mod.rs"]
+TUI --> Config["src/config/mod.rs"]
+AgentOps --> AgentMeta["src/agent/mod.rs"]
 ```
 
 **Diagram sources**
-- [src/mcp/server.rs:521-755](file://src/mcp/server.rs#L521-L755)
-- [src/db/models.rs:58-133](file://src/db/models.rs#L58-L133)
-- [src/git/operations.rs:10-75](file://src/git/operations.rs#L10-L75)
-- [src/tmux/mod.rs:11-189](file://src/tmux/mod.rs#L11-L189)
+- [src/main.rs:16-96](file://src/main.rs#L16-L96)
+- [src/lib.rs:12-23](file://src/lib.rs#L12-L23)
+- [src/tui/app.rs:744-759](file://src/tui/app.rs#L744-L759)
+- [src/agent/operations.rs:110-163](file://src/agent/operations.rs#L110-L163)
+- [src/db/schema.rs:97-208](file://src/db/schema.rs#L97-L208)
+- [src/mcp/mod.rs:1-5](file://src/mcp/mod.rs#L1-L5)
+- [src/config/mod.rs:337-408](file://src/config/mod.rs#L337-L408)
+- [src/agent/mod.rs:10-171](file://src/agent/mod.rs#L10-L171)
 
 **Section sources**
-- [src/mcp/server.rs:521-755](file://src/mcp/server.rs#L521-L755)
-- [src/db/models.rs:58-133](file://src/db/models.rs#L58-L133)
-- [src/git/operations.rs:10-75](file://src/git/operations.rs#L10-L75)
-- [src/tmux/mod.rs:11-189](file://src/tmux/mod.rs#L11-L189)
+- [src/main.rs:16-96](file://src/main.rs#L16-L96)
+- [src/lib.rs:12-23](file://src/lib.rs#L12-L23)
+- [src/tui/app.rs:744-759](file://src/tui/app.rs#L744-L759)
+- [src/agent/operations.rs:110-163](file://src/agent/operations.rs#L110-L163)
+- [src/db/schema.rs:97-208](file://src/db/schema.rs#L97-L208)
+- [src/mcp/mod.rs:1-5](file://src/mcp/mod.rs#L1-L5)
+- [src/config/mod.rs:337-408](file://src/config/mod.rs#L337-L408)
+- [src/agent/mod.rs:10-171](file://src/agent/mod.rs#L10-L171)
 
 ## Performance Considerations
-- Non-blocking background refresh: The TUI uses a background thread to poll tmux pane content and task status, updating caches on the main thread to avoid blocking.
-- Efficient conflict checks: Virtual merges (merge-tree) avoid writing to disk and are suitable for frequent checks.
-- Minimal TUI redraws: Footer and click-region caching reduce layout overhead.
-- tmux pane capture limits: Limit captured lines to reduce I/O overhead.
+- Memory management
+  - Use batched writes for tasks to reduce transaction overhead.
+  - Limit pane content reads to necessary intervals; cache pane hashes to detect changes efficiently.
+- Concurrent operation tuning
+  - Atomic claim and consume operations ensure single-winner semantics for transition requests and notifications.
+  - Background refresh threads offload phase status polling; main thread processes results and escalations.
+- Resource utilization strategies
+  - Tune tmux pane sizes and terminal dimensions to minimize redraw costs.
+  - Use indexes on frequently queried columns (status, project_id) to speed up filtering and updates.
+  - Scope MCP registrations locally to avoid cross-session contention.
 
 [No sources needed since this section provides general guidance]
 
 ## Troubleshooting Guide
-
-### Orchestrator Debugging
-- Ensure the orchestrator session is detected and ready before sending notifications.
-- Use read_pane_content to diagnose stuck agents and send_to_task to resolve prompts.
-- Confirm allowed_actions align with task status and plugin rules.
-
-**Section sources**
-- [src/tui/app.rs:677-1032](file://src/tui/app.rs#L677-L1032)
-- [src/mcp/server.rs:590-653](file://src/mcp/server.rs#L590-L653)
-- [plugins/agtx/skills/orchestrate.md:108-200](file://plugins/agtx/skills/orchestrate.md#L108-L200)
-
-### MCP Server Issues
-- Verify project_id resolution in global mode.
-- Check tool parameter validation and error messages.
-- Ensure the MCP server is reachable and configured for the intended mode (project/global).
+- Debugging agent interactions
+  - Inspect agent pane content via MCP tools and send targeted keystrokes to resolve prompts.
+  - Verify agent availability and resume commands for recovery after restarts.
+- Resolving complex workflow conflicts
+  - Confirm dependency satisfaction before transitions; address unresolved references.
+  - Use escalation notes to track reasons for user intervention.
+- Optimizing large-scale multi-project operations
+  - Prefer project-scoped MCP mode for isolated environments.
+  - Monitor pending transition requests and cleanup old entries to prevent backlog growth.
+  - Validate auto-dismiss rules to reduce manual intervention.
 
 **Section sources**
-- [src/mcp/server.rs:409-444](file://src/mcp/server.rs#L409-L444)
-- [src/mcp/server.rs:521-755](file://src/mcp/server.rs#L521-L755)
-
-### Complex Git Conflict Resolution
-- Use non-destructive merge-tree checks to identify conflicting files.
-- Follow the merge-conflicts skill steps to safely resolve and test changes.
-- If conflicts persist, escalate to the user with a concise reason.
-
-**Section sources**
-- [src/git/operations.rs:211-243](file://src/git/operations.rs#L211-L243)
-- [src/mcp/server.rs:757-827](file://src/mcp/server.rs#L757-L827)
-- [plugins/agtx/skills/merge-conflicts.md:10-53](file://plugins/agtx/skills/merge-conflicts.md#L10-L53)
+- [src/agent/mod.rs:124-171](file://src/agent/mod.rs#L124-L171)
+- [src/db/schema.rs:387-400](file://src/db/schema.rs#L387-L400)
+- [src/db/schema.rs:545-554](file://src/db/schema.rs#L545-L554)
+- [CLAUDE.md:215-226](file://CLAUDE.md#L215-L226)
 
 ## Conclusion
-AGTX’s advanced features enable sophisticated, autonomous workflows:
-- The orchestrator agent streamlines task progression with push-based notifications and intelligent stuck-task handling.
-- Non-destructive Git conflict checks and a structured resolution skill ensure safe merges.
-- Dashboard mode and tmux integration provide powerful multi-project and multi-agent orchestration.
-- Extensive MCP tooling and plugin systems allow customization and extension for complex, evolving needs.
+The advanced features center on a robust orchestrator agent that automates task advancement, detects conflicts, and escalates intelligently. Experimental mode unlocks cutting-edge automation with careful safety mechanisms. The MCP/TUI/database integration provides reliable state coordination, while configuration and plugin extensibility enable expert-level customization. Performance and troubleshooting strategies ensure scalable, observable operations in production.
 
 [No sources needed since this section summarizes without analyzing specific files]
 
 ## Appendices
 
-### CLI Modes and Flags
-- --experimental enables experimental features (e.g., orchestrator agent).
-- -g selects dashboard mode.
-- "." or path selects project mode.
+### Expert-Level Configuration Scenarios
+- Multi-agent workflows: configure per-phase agents to route tasks to specialized agents for planning, running, and review.
+- Workflow plugins: define commands, prompts, and auto-dismiss rules tailored to domain-specific tasks.
+- Security hardening: restrict MCP scope to local, enforce cleanup on exit, and limit agent permissions where applicable.
+- Enterprise deployment: centralize configuration, enforce project-scoped MCP modes, and integrate with external monitoring systems.
 
-**Section sources**
-- [src/main.rs:21-59](file://src/main.rs#L21-L59)
-- [src/lib.rs:12-24](file://src/lib.rs#L12-L24)
+[No sources needed since this section provides general guidance]
+
+### Monitoring and Observability
+- Internal metrics
+  - Track pending transition requests and notification throughput.
+  - Observe orchestrator idle cycles and escalation rates.
+- External integration
+  - Export database snapshots or logs to external monitoring systems.
+  - Use MCP server logs and orchestrator pane content for alerting on stuck tasks.
+
+[No sources needed since this section provides general guidance]

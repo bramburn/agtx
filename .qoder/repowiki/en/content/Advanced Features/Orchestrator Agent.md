@@ -2,16 +2,15 @@
 
 <cite>
 **Referenced Files in This Document**
-- [README.md](file://README.md)
 - [orchestrate.md](file://plugins/agtx/skills/orchestrate.md)
-- [app.rs](file://src/tui/app.rs)
-- [app_tests.rs](file://src/tui/app_tests.rs)
-- [models.rs](file://src/db/models.rs)
+- [merge-conflicts.md](file://plugins/agtx/skills/merge-conflicts.md)
 - [server.rs](file://src/mcp/server.rs)
-- [operations.rs](file://src/tmux/operations.rs)
-- [mod.rs (tmux)](file://src/tmux/mod.rs)
-- [operations.rs (agent)](file://src/agent/operations.rs)
-- [mod.rs (agent)](file://src/agent/mod.rs)
+- [app.rs](file://src/tui/app.rs)
+- [models.rs](file://src/db/models.rs)
+- [operations.rs](file://src/agent/operations.rs)
+- [mod.rs](file://src/config/mod.rs)
+- [main.rs](file://src/main.rs)
+- [operations.rs](file://src/git/operations.rs)
 </cite>
 
 ## Table of Contents
@@ -26,283 +25,344 @@
 9. [Conclusion](#conclusion)
 
 ## Introduction
-This document explains the orchestrator agent functionality that provides autonomous task management. It covers how the orchestrator monitors task progress across phases, advances tasks when conditions are met, detects idle/stuck tasks, and escalates appropriately. It also documents the experimental orchestrator implementation, including session management, content hash monitoring for idle detection, ready-state gating, tmux integration, and the atomic boolean flag system for readiness detection. Practical configuration guidance, interpretation of idle task warnings, and troubleshooting connectivity issues are included.
+This document explains the orchestrator agent functionality that automatically advances tasks through workflow phases, detects conflicts and bottlenecks, escalates when human judgment is required, and provides safety mechanisms to prevent destructive automation. It covers configuration options, threshold settings, and override mechanisms for manual control, along with practical workflows and troubleshooting scenarios.
 
 ## Project Structure
-The orchestrator spans several subsystems:
-- TUI and state machine for task lifecycle and idle detection
-- MCP server exposing board tools to the orchestrator agent
-- tmux integration for agent sessions and pane interactions
-- Database models for tasks, transitions, and notifications
-- Agent registry and orchestrator command construction
+The orchestrator integrates three primary subsystems:
+- MCP server exposing task lifecycle tools to the orchestrator agent
+- TUI application managing tmux sessions, phase detection, and notifications
+- Configuration system controlling agent selection, workflow plugins, and safety thresholds
 
 ```mermaid
 graph TB
-subgraph "TUI"
-APP["app.rs<br/>Task state, idle detection, orchestrator toggle"]
-TESTS["app_tests.rs<br/>Idle detection tests"]
-end
 subgraph "MCP Server"
-MCP["server.rs<br/>Tools: list_tasks, get_task, move_task,<br/>get_transition_status, check_conflicts,<br/>get_notifications, read_pane_content, send_to_task"]
+S1["AgtxMcpServer<br/>tools: list_tasks, get_task,<br/>move_task, check_conflicts,<br/>get_notifications, read_pane_content,<br/>send_to_task"]
 end
-subgraph "tmux"
-OPS["operations.rs<br/>Window/session ops"]
-MOD["mod.rs<br/>Constants and helpers"]
+subgraph "TUI Application"
+T1["AppState<br/>phase_status_cache, pane_content_hashes,<br/>merge_conflict_checked,<br/>stuck_task_notified,<br/>stuck_task_idle_since"]
+T2["Background refresh<br/>poll tmux panes for phase status"]
+T3["Notification pipeline<br/>DB-backed notifications"]
 end
-subgraph "DB Models"
-MODELS["models.rs<br/>Task, TransitionRequest, Notification,<br/>PhaseStatus"]
+subgraph "Configuration"
+C1["GlobalConfig<br/>default_agent, agents"]
+C2["MergedConfig<br/>phase_agents, workflow_plugin"]
+C3["WorkflowPlugin<br/>artifacts, commands, prompts,<br/>prompt_triggers, auto_dismiss"]
 end
-subgraph "Agent"
-AGOPS["operations.rs<br/>AgentOperations, build_orchestrator_command"]
-AGMOD["mod.rs<br/>Agent, known_agents, detect_available_agents"]
+subgraph "Agent Layer"
+A1["AgentOperations<br/>build_interactive_command,<br/>build_resume_command"]
+A2["RealAgentRegistry<br/>per-phase agent selection"]
 end
-APP --> MCP
-APP --> OPS
-APP --> MODELS
-MCP --> MODELS
-MCP --> OPS
-AGOPS --> AGMOD
+subgraph "Git Integration"
+G1["GitOperations<br/>fetch_and_check_conflicts,<br/>diff, commit, push"]
+end
+S1 --> T1
+T1 --> T2
+T1 --> T3
+T1 --> A1
+T1 --> G1
+C1 --> C2
+C2 --> A2
+C2 --> T1
 ```
 
 **Diagram sources**
-- [app.rs:6241-6770](file://src/tui/app.rs#L6241-L6770)
-- [server.rs:521-755](file://src/mcp/server.rs#L521-L755)
-- [operations.rs:64-248](file://src/tmux/operations.rs#L64-L248)
-- [mod.rs (tmux):11-189](file://src/tmux/mod.rs#L11-L189)
-- [models.rs:58-245](file://src/db/models.rs#L58-L245)
-- [operations.rs (agent):18-108](file://src/agent/operations.rs#L18-L108)
-- [mod.rs (agent):10-122](file://src/agent/mod.rs#L10-L122)
+- [server.rs:395-520](file://src/mcp/server.rs#L395-L520)
+- [app.rs:447-560](file://src/tui/app.rs#L447-L560)
+- [mod.rs:337-408](file://src/config/mod.rs#L337-L408)
+- [operations.rs:110-163](file://src/agent/operations.rs#L110-L163)
+- [operations.rs:1-163](file://src/git/operations.rs#L1-L163)
 
 **Section sources**
-- [README.md:604-646](file://README.md#L604-L646)
-- [app.rs:6241-6770](file://src/tui/app.rs#L6241-L6770)
-- [server.rs:521-755](file://src/mcp/server.rs#L521-L755)
-- [operations.rs:64-248](file://src/tmux/operations.rs#L64-L248)
-- [mod.rs (tmux):11-189](file://src/tmux/mod.rs#L11-L189)
-- [models.rs:58-245](file://src/db/models.rs#L58-L245)
-- [operations.rs (agent):18-108](file://src/agent/operations.rs#L18-L108)
-- [mod.rs (agent):10-122](file://src/agent/mod.rs#L10-L122)
+- [server.rs:395-520](file://src/mcp/server.rs#L395-L520)
+- [app.rs:447-560](file://src/tui/app.rs#L447-L560)
+- [mod.rs:337-408](file://src/config/mod.rs#L337-L408)
+- [operations.rs:110-163](file://src/agent/operations.rs#L110-L163)
+- [operations.rs:1-163](file://src/git/operations.rs#L1-L163)
 
 ## Core Components
-- Task lifecycle and state transitions: Tasks move through Backlog, Planning, Running, Review, Done. Allowed actions are computed based on plugin rules and dependency satisfaction.
-- MCP server: Provides tools for listing tasks, fetching details, queuing transitions, checking conflicts, reading pane content, sending messages, and retrieving notifications.
-- tmux integration: Manages sessions/windows, captures pane content, sends keys, and attaches to agent panes.
-- Database models: Persist tasks, transition requests, notifications, and runtime-only phase status.
-- Agent orchestration: Builds orchestrator launch commands (including MCP registration) and supports resume/interactive modes.
+- Orchestrator skill definition: defines lifecycle, strategy, stuck-task handling, and escalation rules.
+- MCP server tools: list tasks, get task details, move tasks, check conflicts, read pane content, send messages, and manage notifications.
+- TUI orchestrator runtime: tracks phase status, detects idle/stuck tasks, and triggers notifications.
+- Configuration: per-phase agent selection, workflow plugin settings, and safety thresholds.
+- Git conflict detection: read-only merge conflict checks without modifying working trees.
 
 **Section sources**
-- [models.rs:58-245](file://src/db/models.rs#L58-L245)
-- [server.rs:473-518](file://src/mcp/server.rs#L473-L518)
-- [operations.rs (agent):92-107](file://src/agent/operations.rs#L92-L107)
-- [mod.rs (agent):10-122](file://src/agent/mod.rs#L10-L122)
-- [operations.rs:64-248](file://src/tmux/operations.rs#L64-L248)
-- [mod.rs (tmux):11-189](file://src/tmux/mod.rs#L11-L189)
+- [orchestrate.md:6-200](file://plugins/agtx/skills/orchestrate.md#L6-L200)
+- [server.rs:521-1216](file://src/mcp/server.rs#L521-L1216)
+- [app.rs:447-560](file://src/tui/app.rs#L447-L560)
+- [mod.rs:337-408](file://src/config/mod.rs#L337-L408)
+- [operations.rs:211-244](file://src/db/models.rs#L211-L244)
+- [operations.rs:57-61](file://src/git/operations.rs#L57-L61)
 
 ## Architecture Overview
-The orchestrator agent operates by registering with the MCP server and receiving push-based notifications when tasks complete phases. It queries the board state, validates allowed actions, and queues transitions. When tasks become idle, it reads pane content and either nudges the agent or escalates to the user.
+The orchestrator agent operates as a pull-based MCP client that receives notifications when a phase completes. It queries task details, validates allowed actions, and advances tasks automatically while escalating on ambiguity or bottlenecks.
 
 ```mermaid
 sequenceDiagram
-participant User as "User"
-participant TUI as "TUI (app.rs)"
-participant MCP as "MCP Server (server.rs)"
-participant DB as "Database (models.rs)"
-participant TMUX as "tmux (operations.rs)"
-participant Agent as "Agent Pane"
-User->>TUI : Toggle orchestrator
-TUI->>MCP : Register project-scoped MCP server
-Note over TUI,MCP : Orchestrator sends "move_task" requests
-MCP->>DB : Create TransitionRequest
-DB-->>MCP : Transition queued
-MCP-->>TUI : Transition status pending
-TUI->>TMUX : Execute side effects (agent switch, skill deploy)
-TMUX-->>Agent : Send commands/prompts
-Agent-->>TUI : Emit "[agtx : idle]" when ready
-TUI->>MCP : get_notifications()
-MCP-->>TUI : Notifications (phase completed)
-TUI->>MCP : get_task(task_id)
-MCP-->>TUI : Task details + allowed_actions
-TUI->>MCP : move_task(move_forward)
-MCP->>DB : Mark processed
-DB-->>MCP : Transition completed
-MCP-->>TUI : Status completed
-TUI->>TMUX : Read pane content (on idle)
-TMUX-->>TUI : Pane text
-alt Needs user input
-TUI->>MCP : move_task(escalate_to_user)
-else Continue
-TUI->>TMUX : send_to_task(nudge)
+participant User as "User/TUI"
+participant MCP as "AgtxMcpServer"
+participant DB as "Database"
+participant TUI as "AppState"
+participant TMUX as "tmux Sessions"
+User->>MCP : "list_tasks()"
+MCP->>DB : "get_all_tasks()"
+DB-->>MCP : "tasks"
+MCP-->>User : "Task summaries"
+User->>MCP : "get_task(task_id)"
+MCP->>DB : "get_task(task_id)"
+DB-->>MCP : "Task + deps_satisfied"
+MCP-->>User : "Task detail + allowed_actions"
+User->>MCP : "move_task(task_id, action)"
+MCP->>DB : "create_transition_request"
+DB-->>MCP : "request_id"
+MCP-->>User : "Queued"
+TUI->>DB : "consume_notifications()"
+DB-->>TUI : "New notifications"
+TUI->>TMUX : "Poll pane content"
+TUI->>MCP : "get_transition_status(request_id)"
+MCP->>DB : "lookup request"
+DB-->>MCP : "status/error"
+MCP-->>TUI : "status"
+alt "Phase artifact detected"
+TUI->>MCP : "move_task(..., move_forward)"
+else "Stuck task detected"
+TUI->>MCP : "read_pane_content(task_id)"
+MCP->>TMUX : "capture-pane"
+TMUX-->>MCP : "pane content"
+MCP-->>TUI : "content"
+TUI->>MCP : "send_to_task(task_id, response)"
+TUI->>MCP : "escalate_to_user(task_id, reason)"
 end
 ```
 
 **Diagram sources**
-- [README.md:623-646](file://README.md#L623-L646)
-- [server.rs:593-721](file://src/mcp/server.rs#L593-L721)
-- [models.rs:162-184](file://src/db/models.rs#L162-L184)
-- [operations.rs:166-172](file://src/tmux/operations.rs#L166-L172)
-- [app.rs:6241-6770](file://src/tui/app.rs#L6241-L6770)
+- [server.rs:548-721](file://src/mcp/server.rs#L548-L721)
+- [server.rs:837-974](file://src/mcp/server.rs#L837-L974)
+- [app.rs:521-532](file://src/tui/app.rs#L521-L532)
+
+**Section sources**
+- [server.rs:548-721](file://src/mcp/server.rs#L548-L721)
+- [server.rs:837-974](file://src/mcp/server.rs#L837-L974)
+- [app.rs:521-532](file://src/tui/app.rs#L521-L532)
 
 ## Detailed Component Analysis
 
-### Idle Detection and Ready-State Gating
-The orchestrator uses a hybrid idle detection mechanism:
-- Content change detection: Compares pane content snapshots to detect progress.
-- Timer-based fallback: If content remains unchanged beyond a threshold, marks the pane as idle.
-- Explicit idle signal: If the pane output ends with a specific marker, the orchestrator treats it as ready regardless of content changes.
-
-Key constants and logic:
-- Threshold: A fixed number of seconds after which unchanging output is considered idle.
-- Stable timer: Starts when content first stops changing; if it exceeds the threshold, the pane is idle.
-- Priority signal: Presence of a readiness marker in the latest output overrides content-change state.
+### Automatic Task Advancement System
+- Lifecycle: Backlog → Research → Planning → Running → Review. The orchestrator manages Planning and Running phases.
+- Strategy: On startup, list tasks; when notified a phase completes, read task details, check allowed actions, and move forward.
+- Concurrency: The orchestrator does not coordinate parallelism—multiple tasks can be active; it advances what is present.
+- Error handling: If transition status indicates an error, investigate and retry with a different approach.
+- Idle signaling: After processing, output a specific idle marker to receive push notifications.
 
 ```mermaid
 flowchart TD
-Start(["Check pane content"]) --> Compare["Compare current vs previous snapshot"]
-Compare --> Changed{"Changed?"}
-Changed --> |Yes| ResetTimer["Reset stable_since timer"]
-Changed --> |No| HasTimer{"Has stable_since?"}
-HasTimer --> |No| StartTimer["Set stable_since to now"]
-HasTimer --> |Yes| Elapsed{"Elapsed > threshold?"}
-Elapsed --> |Yes| MarkIdle["Mark as Idle"]
-Elapsed --> |No| MarkWaiting["Mark as Waiting"]
-ResetTimer --> MarkWaiting
-StartTimer --> MarkWaiting
-MarkIdle --> SignalCheck["Scan for readiness marker"]
-MarkWaiting --> SignalCheck
-SignalCheck --> |Marker found| MarkReady["Mark as Ready"]
-SignalCheck --> |No marker| KeepState["Keep Idle/Waiting"]
+Start(["Startup"]) --> List["list_tasks()"]
+List --> WaitNotif["Wait for phase-completion notifications"]
+WaitNotif --> ReadTask["get_task(task_id)"]
+ReadTask --> Allowed{"allowed_actions contains move_forward?"}
+Allowed --> |Yes| Advance["move_task(action='move_forward')"]
+Allowed --> |No| Idle["Output idle marker and wait"]
+Advance --> Status["get_transition_status(request_id)"]
+Status --> Complete{"completed?"}
+Complete --> |Yes| WaitNotif
+Complete --> |Error| Investigate["Investigate and retry"]
+Investigate --> WaitNotif
 ```
 
 **Diagram sources**
-- [app.rs:6751-6770](file://src/tui/app.rs#L6751-L6770)
-- [app_tests.rs:4818-4874](file://src/tui/app_tests.rs#L4818-L4874)
-- [app_tests.rs:6807-6846](file://src/tui/app_tests.rs#L6807-L6846)
+- [orchestrate.md:57-90](file://plugins/agtx/skills/orchestrate.md#L57-L90)
+- [server.rs:655-721](file://src/mcp/server.rs#L655-L721)
+- [server.rs:726-755](file://src/mcp/server.rs#L726-L755)
 
 **Section sources**
-- [app.rs:6741-6770](file://src/tui/app.rs#L6741-L6770)
-- [app_tests.rs:4818-4874](file://src/tui/app_tests.rs#L4818-L4874)
-- [app_tests.rs:6807-6846](file://src/tui/app_tests.rs#L6807-L6846)
+- [orchestrate.md:57-90](file://plugins/agtx/skills/orchestrate.md#L57-L90)
+- [server.rs:655-721](file://src/mcp/server.rs#L655-L721)
+- [server.rs:726-755](file://src/mcp/server.rs#L726-L755)
 
-### Session Management and tmux Integration
-- tmux server: Dedicated server for agent sessions.
-- Session naming: Derived from project and task identifiers for uniqueness and readability.
-- Window management: Creates windows per task, supports sending keys/paste, capturing pane content, resizing, and attaching.
-- Agent sessions: Each task runs in its own window; the orchestrator can read panes and send inputs to resolve interactive prompts.
+### Intelligent Conflict Detection Mechanism
+- Read-only merge conflict checks: The MCP tool fetches the project’s default branch and performs a virtual merge check without modifying the working tree.
+- Scope: Can check a single task or all tasks in Review status.
+- Results: Reports whether conflicts exist, lists conflicting files, and surfaces errors.
 
 ```mermaid
-graph TB
-Srv["tmux server 'agtx'"]
-Proj["Project session"]
-Win["Task window"]
-Pane["Agent pane"]
-Srv --> Proj
-Proj --> Win
-Win --> Pane
+flowchart TD
+Start(["check_conflicts(task_id?)"]) --> Resolve["Resolve project path"]
+Resolve --> DetectMain["Detect main branch (main/master)"]
+DetectMain --> LoadTasks["Load tasks (single or Review)"]
+LoadTasks --> Loop{"For each task"}
+Loop --> Fetch["git fetch origin"]
+Fetch --> MergeTree["merge-tree --write-tree HEAD <main>"]
+MergeTree --> Result{"Exit code indicates conflicts?"}
+Result --> |Yes| Report["has_conflicts=true, conflicting_files"]
+Result --> |No| ReportClean["has_conflicts=false"]
+Report --> Next["Next task"]
+ReportClean --> Next
+Next --> Loop
+Loop --> Done(["Return results"])
 ```
 
 **Diagram sources**
-- [mod.rs (tmux):11-189](file://src/tmux/mod.rs#L11-L189)
-- [operations.rs:64-248](file://src/tmux/operations.rs#L64-L248)
+- [server.rs:757-832](file://src/mcp/server.rs#L757-L832)
+- [operations.rs:211-243](file://src/git/operations.rs#L211-L243)
 
 **Section sources**
-- [mod.rs (tmux):11-189](file://src/tmux/mod.rs#L11-L189)
-- [operations.rs:64-248](file://src/tmux/operations.rs#L64-L248)
+- [server.rs:757-832](file://src/mcp/server.rs#L757-L832)
+- [operations.rs:211-243](file://src/git/operations.rs#L211-L243)
 
-### Atomic Boolean Flag System for Readiness Detection
-The orchestrator relies on a readiness marker emitted by agent panes to indicate they are idle and ready for the next instruction. The TUI interprets this marker and treats the pane as ready even if content has not changed. This avoids busy-wait loops and reduces unnecessary MCP calls.
+### Escalation Protocols and Human Oversight
+Escalation occurs when:
+- Interactive prompts require user decisions (e.g., yes/no, numbered options without a recommended choice).
+- Domain questions arise that require project knowledge or architectural judgment.
+- Agents are stuck in loops or repeating errors despite nudging.
 
-- Marker emission: Agents output a specific marker when they are waiting for user input.
-- TUI detection: The TUI scans pane content for the marker and sets readiness accordingly.
-- Behavior: On readiness, the orchestrator proceeds with transitions; on idle without readiness, it reads the pane to diagnose and act.
+Escalation actions:
+- `escalate_to_user`: Flags the task for user attention with a concise reason. The TUI displays a visible banner with the reason.
+- `send_to_task`: Sends a response to the agent pane to answer prompts or provide guidance.
+
+```mermaid
+flowchart TD
+Start(["Pane content observed"]) --> Classify{"Decision rule classification"}
+Classify --> |Yes/No prompt| Answer["send_to_task(response)"]
+Classify --> |Numbered options| Recommend{"Recommended option?"}
+Recommend --> |Yes| Select["send_to_task(option_number)"]
+Recommend --> |No| Escalate["escalate_to_user(reason)"]
+Classify --> |Domain question| Escalate
+Classify --> |Stuck loop| Nudge["send_to_task(nudge)"]
+Nudge --> SecondIdle{"Second idle notification?"}
+SecondIdle --> |Yes| Escalate
+SecondIdle --> |No| Wait["Wait for progress"]
+```
+
+**Diagram sources**
+- [orchestrate.md:108-200](file://plugins/agtx/skills/orchestrate.md#L108-L200)
+- [server.rs:912-974](file://src/mcp/server.rs#L912-L974)
 
 **Section sources**
-- [README.md:632-644](file://README.md#L632-L644)
-- [orchestrate.md:30-75](file://plugins/agtx/skills/orchestrate.md#L30-L75)
+- [orchestrate.md:108-200](file://plugins/agtx/skills/orchestrate.md#L108-L200)
+- [server.rs:912-974](file://src/mcp/server.rs#L912-L974)
 
-### MCP Integration and Transition Gating
-The orchestrator communicates with the board via MCP tools:
-- list_tasks: Discover tasks in Planning or Running.
-- get_task: Retrieve task details and allowed_actions.
-- move_task: Queue a transition; the TUI executes side effects and updates state.
-- get_transition_status: Poll for completion/error.
-- check_conflicts: Non-destructive conflict check for Review tasks.
-- get_notifications: Pull push-based notifications about phase completions.
-- read_pane_content: Read pane content to diagnose stuck tasks.
-- send_to_task: Send keystrokes or messages to resolve interactive prompts.
+### Experimental Mode Activation and Safety Mechanisms
+- Experimental flag: Passed via command-line argument to enable advanced features (e.g., orchestrator reattach).
+- Safety safeguards:
+  - Agent switching uses graceful exit commands per agent type, with fallbacks (Ctrl+C/Ctrl+D).
+  - Content stability thresholds prevent premature input to agents mid-render.
+  - Orchestrator idle detection uses both content hashing and fallback timing to avoid false positives.
+  - Catch-up replay of completed-phase notifications ensures continuity after restarts.
 
-Allowed actions are computed based on plugin rules and dependency satisfaction, ensuring the orchestrator respects workflow constraints.
+```mermaid
+sequenceDiagram
+participant CLI as "CLI"
+participant Main as "main.rs"
+participant TUI as "App"
+participant Orchestrator as "AppState"
+CLI->>Main : "--experimental"
+Main->>Main : "flags.experimental = true"
+Main->>TUI : "App : : new(mode, flags)"
+TUI->>Orchestrator : "detect_existing_orchestrator(experimental)"
+Orchestrator->>Orchestrator : "run_orchestrator_catchup(db, tasks)"
+Orchestrator-->>TUI : "Reattached orchestrator"
+```
+
+**Diagram sources**
+- [main.rs:16-62](file://src/main.rs#L16-L62)
+- [app.rs:8475-8551](file://src/tui/app.rs#L8475-L8551)
 
 **Section sources**
-- [server.rs:521-755](file://src/mcp/server.rs#L521-L755)
+- [main.rs:16-62](file://src/main.rs#L16-L62)
+- [app.rs:8475-8551](file://src/tui/app.rs#L8475-L8551)
+
+### Configuration Options and Threshold Settings
+- Per-phase agent selection:
+  - Configure different agents for research, planning, running, and review.
+  - Falls back to default agent if no phase-specific override is set.
+- Workflow plugin:
+  - Controls artifacts, commands, prompts, prompt triggers, and auto-dismiss rules.
+  - Supports cyclic workflows and context clearing on phase advance for compatible agents.
+- Thresholds and timeouts:
+  - Phase idle detection uses content hashing and stability thresholds.
+  - Orchestrator idle fallback uses a configurable timeout.
+  - Prompt-trigger waiting has bounded retries to avoid indefinite blocking.
+
+**Section sources**
+- [mod.rs:390-408](file://src/config/mod.rs#L390-L408)
+- [mod.rs:410-594](file://src/config/mod.rs#L410-L594)
+- [app.rs:521-532](file://src/tui/app.rs#L521-L532)
+
+### Override Mechanisms for Manual Control
+- Allowed actions: The MCP server computes valid transitions based on task status and plugin rules, preventing invalid forward moves from Backlog when dependencies are unsatisfied.
+- Direct intervention:
+  - `send_to_task`: Provide answers to prompts or guide stuck agents.
+  - `escalate_to_user`: Request human review for ambiguous or judgment-required situations.
+  - `move_task`: Force transitions when appropriate (e.g., move_to_done in Review).
+
+**Section sources**
 - [server.rs:473-518](file://src/mcp/server.rs#L473-L518)
-- [models.rs:162-184](file://src/db/models.rs#L162-L184)
-
-### Experimental Orchestrator Implementation Details
-- Agent orchestration command: The agent registry builds a command that registers the MCP server locally, runs the agent, and cleans up the registration on exit.
-- Session management: The TUI ensures the project tmux session exists and clears per-task caches when switching projects.
-- Idle handling: When idle notifications arrive, the orchestrator reads pane content and either nudges the agent or escalates to the user.
-
-**Section sources**
-- [operations.rs (agent):92-107](file://src/agent/operations.rs#L92-L107)
-- [app.rs:6693-6709](file://src/tui/app.rs#L6693-L6709)
-- [README.md:623-646](file://README.md#L623-L646)
+- [server.rs:655-721](file://src/mcp/server.rs#L655-L721)
+- [server.rs:912-974](file://src/mcp/server.rs#L912-L974)
 
 ## Dependency Analysis
-The orchestrator’s behavior emerges from interactions among the TUI, MCP server, tmux, and database models. The TUI orchestrates state transitions and idle detection, the MCP server mediates with the board, tmux provides agent session control, and the database persists state and notifications.
+The orchestrator relies on:
+- MCP server for task state transitions and diagnostics
+- TUI for tmux session management, phase detection, and notifications
+- Configuration system for agent selection and workflow customization
+- Git integration for conflict detection and repository operations
 
 ```mermaid
 graph LR
-TUI["TUI (app.rs)"] --> MCP["MCP Server (server.rs)"]
-TUI --> DB["DB Models (models.rs)"]
-TUI --> TMUX["tmux (operations.rs)"]
-MCP --> DB
-MCP --> TMUX
-AGOPS["Agent Ops (agent/operations.rs)"] --> AGMOD["Agent (agent/mod.rs)"]
-AGOPS --> TUI
+Orchestrator["Orchestrator Agent"] --> MCP["AgtxMcpServer"]
+MCP --> DB["Database"]
+MCP --> TMUX["tmux"]
+Orchestrator --> TUI["AppState"]
+TUI --> DB
+TUI --> TMUX
+TUI --> Config["MergedConfig"]
+TUI --> Git["GitOperations"]
+Config --> Agents["AgentRegistry"]
+Agents --> AgentOps["AgentOperations"]
 ```
 
 **Diagram sources**
-- [app.rs:6241-6770](file://src/tui/app.rs#L6241-L6770)
-- [server.rs:521-755](file://src/mcp/server.rs#L521-L755)
-- [models.rs:58-245](file://src/db/models.rs#L58-L245)
-- [operations.rs:64-248](file://src/tmux/operations.rs#L64-L248)
-- [operations.rs (agent):18-108](file://src/agent/operations.rs#L18-L108)
-- [mod.rs (agent):10-122](file://src/agent/mod.rs#L10-L122)
+- [server.rs:395-520](file://src/mcp/server.rs#L395-L520)
+- [app.rs:447-560](file://src/tui/app.rs#L447-L560)
+- [mod.rs:337-408](file://src/config/mod.rs#L337-L408)
+- [operations.rs:110-163](file://src/agent/operations.rs#L110-L163)
+- [operations.rs:1-163](file://src/git/operations.rs#L1-L163)
 
 **Section sources**
-- [app.rs:6241-6770](file://src/tui/app.rs#L6241-L6770)
-- [server.rs:521-755](file://src/mcp/server.rs#L521-L755)
-- [models.rs:58-245](file://src/db/models.rs#L58-L245)
-- [operations.rs:64-248](file://src/tmux/operations.rs#L64-L248)
-- [operations.rs (agent):18-108](file://src/agent/operations.rs#L18-L108)
-- [mod.rs (agent):10-122](file://src/agent/mod.rs#L10-L122)
+- [server.rs:395-520](file://src/mcp/server.rs#L395-L520)
+- [app.rs:447-560](file://src/tui/app.rs#L447-L560)
+- [mod.rs:337-408](file://src/config/mod.rs#L337-L408)
+- [operations.rs:110-163](file://src/agent/operations.rs#L110-L163)
+- [operations.rs:1-163](file://src/git/operations.rs#L1-L163)
 
 ## Performance Considerations
-- Background thread architecture: The orchestrator initializes within the TUI’s main loop and uses non-blocking MCP calls and tmux operations. This avoids heavy polling and leverages push-based notifications.
-- Monitoring many concurrent tasks: The TUI maintains per-task caches and clears them when switching projects to prevent stale state. Idle detection uses a fixed threshold to minimize frequent pane reads.
-- Efficient pane reads: The MCP server’s read_pane_content tool limits the number of lines captured, reducing overhead.
-- Transition batching: The orchestrator advances tasks only when conditions are met, avoiding redundant transitions.
+- Asynchronous background refresh: The TUI polls tmux panes in the background to avoid blocking the UI.
+- Content hashing and stability thresholds: Reduce unnecessary transitions and minimize false positives for idle detection.
+- Bounded waits: Prompt-trigger and agent-ready waits cap retries to prevent indefinite stalls.
+- Read-only conflict checks: Virtual merge avoids heavy operations and preserves working tree integrity.
 
 [No sources needed since this section provides general guidance]
 
 ## Troubleshooting Guide
-Common issues and resolutions:
-- Orchestrator not receiving notifications:
-  - Ensure the MCP server is registered and reachable. The agent orchestrator command includes registration and cleanup steps.
-  - Verify tmux server is running and sessions exist for the project.
-- Stuck tasks:
-  - Confirm the agent pane emits the readiness marker when idle.
-  - Use read_pane_content to inspect the pane and send targeted inputs via send_to_task.
-  - If repeated nudges fail, escalate to the user with a reason.
+Common scenarios and resolutions:
+- Task stuck on a yes/no prompt:
+  - Use `read_pane_content` to confirm the prompt, then `send_to_task` with the appropriate response.
+- Ambiguous numbered options without a recommended choice:
+  - Escalate to the user with a concise reason summarizing the decision point.
+- Domain question requiring architectural judgment:
+  - Escalate to the user; do not answer on their behalf.
+- Repeated error or spinning agent:
+  - Send a targeted nudge via `send_to_task`; if a second idle notification arrives, escalate.
 - Merge conflicts in Review:
-  - Use check_conflicts to detect conflicts without modifying files, then resolve and re-run the review phase.
-- Idle task warnings:
-  - The TUI flags tasks that have been idle for a period without artifacts. Opening the task popup shows the reason and allows dismissal.
+  - Use the conflict-check tool to identify conflicts; resolve using the merge conflict resolution skill.
+- Agent not responding:
+  - Switch agents gracefully using the built-in switching logic; ensure the pane stabilizes before sending prompts.
 
 **Section sources**
-- [operations.rs (agent):92-107](file://src/agent/operations.rs#L92-L107)
-- [server.rs:757-800](file://src/mcp/server.rs#L757-L800)
-- [app.rs:6241-6770](file://src/tui/app.rs#L6241-L6770)
+- [orchestrate.md:108-200](file://plugins/agtx/skills/orchestrate.md#L108-L200)
+- [server.rs:757-832](file://src/mcp/server.rs#L757-L832)
+- [merge-conflicts.md:1-53](file://plugins/agtx/skills/merge-conflicts.md#L1-L53)
+- [app.rs:8604-8735](file://src/tui/app.rs#L8604-L8735)
 
 ## Conclusion
-The orchestrator agent automates task progression by monitoring pane activity, respecting plugin-defined gating rules, and escalating when human intervention is required. Its tmux-backed session management, MCP-driven coordination, and robust idle detection enable reliable autonomous operation across many concurrent tasks.
+The orchestrator agent automates task progression through Planning and Running phases, escalates on ambiguity or bottlenecks, and integrates with conflict detection and tmux session management. Its configuration system enables per-phase agent selection and workflow customization, while safety mechanisms prevent destructive automation. By combining MCP tools, TUI runtime logic, and robust escalation protocols, the system provides a reliable foundation for autonomous task orchestration with human oversight when needed.

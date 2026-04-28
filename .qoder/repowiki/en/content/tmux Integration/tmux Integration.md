@@ -2,13 +2,14 @@
 
 <cite>
 **Referenced Files in This Document**
-- [mod.rs](file://src/tmux/mod.rs)
-- [operations.rs](file://src/tmux/operations.rs)
-- [app.rs](file://src/tui/app.rs)
-- [agent.rs](file://src/agent/mod.rs)
-- [operations.rs](file://src/agent/operations.rs)
-- [lib.rs](file://src/lib.rs)
-- [main.rs](file://src/main.rs)
+- [src/tmux/mod.rs](file://src/tmux/mod.rs)
+- [src/tmux/operations.rs](file://src/tmux/operations.rs)
+- [src/tui/app.rs](file://src/tui/app.rs)
+- [src/tui/shell_popup.rs](file://src/tui/shell_popup.rs)
+- [src/mcp/server.rs](file://src/mcp/server.rs)
+- [src/config/mod.rs](file://src/config/mod.rs)
+- [src/lib.rs](file://src/lib.rs)
+- [src/main.rs](file://src/main.rs)
 </cite>
 
 ## Table of Contents
@@ -20,335 +21,355 @@
 6. [Dependency Analysis](#dependency-analysis)
 7. [Performance Considerations](#performance-considerations)
 8. [Troubleshooting Guide](#troubleshooting-guide)
-9. [Conclusion](#conclusion)
+9. [Security Considerations](#security-considerations)
+10. [Customization and Integration](#customization-and-integration)
+11. [Conclusion](#conclusion)
 
 ## Introduction
-This document explains how AGTX integrates with tmux to manage persistent, isolated agent sessions for development tasks. It covers the dedicated tmux server architecture, session and window management, agent pane monitoring, and practical workflows for interacting with agent sessions. It also provides configuration guidance and troubleshooting advice for tmux-related operations.
+This document explains the tmux integration that powers agent sessions in the application. It covers the dedicated tmux server architecture, per-project sessions, per-task windows, session lifecycle management, persistent agent workflows, fullscreen attachment, inline task popups, pane capture and monitoring, configuration best practices, performance optimization, troubleshooting, security considerations, and integration guidance.
 
 ## Project Structure
-AGTX organizes tmux integration into focused modules:
-- A low-level tmux module that wraps tmux CLI invocations for session/window/pane operations.
-- An injectable operations trait for tmux to support testing and alternate backends.
-- A TUI application layer that orchestrates project sessions, task windows, agent startup, and pane monitoring.
-- Agent integration that builds agent-specific commands and resumes sessions after tmux restarts.
+The tmux integration is implemented across several modules:
+- Low-level tmux operations and utilities
+- A trait-based abstraction enabling testability and runtime substitution
+- TUI integration for session management, monitoring, and user interaction
+- MCP server integration for external control and inspection
+- Configuration options affecting tmux behavior
 
 ```mermaid
 graph TB
-subgraph "tmux Layer"
-TMOD["src/tmux/mod.rs<br/>CLI wrappers"]
-TOPS["src/tmux/operations.rs<br/>trait + RealTmuxOps"]
+subgraph "Core Modules"
+TMUX_MOD["tmux/mod.rs<br/>Public API and utilities"]
+TMUX_OPS["tmux/operations.rs<br/>Trait and real implementation"]
+TUI_APP["tui/app.rs<br/>Session lifecycle and monitoring"]
+SHELL_POPUP["tui/shell_popup.rs<br/>Inline popup rendering"]
+MCP_SERVER["mcp/server.rs<br/>External control via MCP"]
+CONFIG["config/mod.rs<br/>User preferences"]
 end
-subgraph "TUI Layer"
-APP["src/tui/app.rs<br/>App orchestrates sessions/windows"]
-end
-subgraph "Agent Layer"
-AGMOD["src/agent/mod.rs<br/>Agent model"]
-AGOPS["src/agent/operations.rs<br/>AgentOperations"]
-end
-LIB["src/lib.rs"]
-MAIN["src/main.rs"]
-APP --> TOPS
-APP --> AGOPS
-APP --> TMOD
-AGOPS --> AGMOD
-LIB --> APP
-MAIN --> LIB
+TMUX_MOD --> TMUX_OPS
+TUI_APP --> TMUX_OPS
+TUI_APP --> SHELL_POPUP
+MCP_SERVER --> TMUX_MOD
+TUI_APP --> CONFIG
 ```
 
 **Diagram sources**
-- [mod.rs:1-189](file://src/tmux/mod.rs#L1-L189)
-- [operations.rs:1-249](file://src/tmux/operations.rs#L1-L249)
-- [app.rs:1-120](file://src/tui/app.rs#L1-L120)
-- [agent.rs:1-171](file://src/agent/mod.rs#L1-L171)
-- [operations.rs:1-163](file://src/agent/operations.rs#L1-L163)
-- [lib.rs:1-24](file://src/lib.rs#L1-L24)
-- [main.rs:1-96](file://src/main.rs#L1-L96)
+- [src/tmux/mod.rs:1-189](file://src/tmux/mod.rs#L1-L189)
+- [src/tmux/operations.rs:1-249](file://src/tmux/operations.rs#L1-L249)
+- [src/tui/app.rs:1-120](file://src/tui/app.rs#L1-L120)
+- [src/tui/shell_popup.rs:1-326](file://src/tui/shell_popup.rs#L1-L326)
+- [src/mcp/server.rs:108-959](file://src/mcp/server.rs#L108-L959)
+- [src/config/mod.rs:23-35](file://src/config/mod.rs#L23-L35)
 
 **Section sources**
-- [mod.rs:1-189](file://src/tmux/mod.rs#L1-L189)
-- [operations.rs:1-249](file://src/tmux/operations.rs#L1-L249)
-- [app.rs:1-120](file://src/tui/app.rs#L1-L120)
-- [agent.rs:1-171](file://src/agent/mod.rs#L1-L171)
-- [operations.rs:1-163](file://src/agent/operations.rs#L1-L163)
-- [lib.rs:1-24](file://src/lib.rs#L1-L24)
-- [main.rs:1-96](file://src/main.rs#L1-L96)
+- [src/lib.rs:1-24](file://src/lib.rs#L1-L24)
+- [src/main.rs:16-96](file://src/main.rs#L16-L96)
 
 ## Core Components
-- Dedicated tmux server: AGTX uses a named server to isolate agent sessions from the user’s default tmux environment.
-- Session naming: Projects are mapped to tmux sessions; tasks become tmux windows within those sessions.
-- Window lifecycle: Windows are created per task with working directories set to task worktrees; they persist across agent restarts.
-- Pane monitoring: Content hashing and cursor-aware capture power real-time UI updates and idle detection.
-- Agent integration: Agents are launched with project-appropriate commands; sessions can be resumed after tmux server restarts.
+- Dedicated tmux server: All agent sessions run under a named server to isolate them from user sessions.
+- Per-project tmux session: A top-level session groups all tasks for a project.
+- Per-task tmux windows: Each task runs in its own window within the project session.
+- Persistent agent context: Sessions persist across task lifecycle transitions, enabling seamless agent switching and continuity.
+- Inline task popup: An embedded TUI popup displays live pane content with scrolling and cursor-aware trimming.
+- Fullscreen attachment: Users can attach directly to a task’s tmux session for uninterrupted interaction.
+- Pane capture and monitoring: Continuous capture of pane content drives idle detection and phase readiness checks.
 
 **Section sources**
-- [mod.rs:11-188](file://src/tmux/mod.rs#L11-L188)
-- [operations.rs:8-59](file://src/tmux/operations.rs#L8-L59)
-- [app.rs:6525-6571](file://src/tui/app.rs#L6525-L6571)
-- [agent.rs:10-77](file://src/agent/mod.rs#L10-L77)
-- [operations.rs:44-108](file://src/agent/operations.rs#L44-L108)
+- [src/tmux/mod.rs:11-189](file://src/tmux/mod.rs#L11-L189)
+- [src/tmux/operations.rs:10-249](file://src/tmux/operations.rs#L10-L249)
+- [src/tui/app.rs:6831-6890](file://src/tui/app.rs#L6831-L6890)
+- [src/tui/shell_popup.rs:1-326](file://src/tui/shell_popup.rs#L1-L326)
+- [src/config/mod.rs:23-35](file://src/config/mod.rs#L23-L35)
 
 ## Architecture Overview
-The tmux integration centers on a single server for agent sessions, with project-level sessions and task-level windows. The TUI ensures the project session exists, creates task windows, monitors pane activity, and recovers sessions when needed.
+The tmux integration centers on a dedicated server and a layered approach to session management and monitoring.
 
 ```mermaid
 graph TB
-subgraph "tmux Server"
-S["Server 'agtx'"]
-SES["Project Session"]
-WIN["Task Window"]
-PANE["Agent Pane"]
+subgraph "Dedicated tmux server"
+AGTX["Server 'agtx'<br/>Isolated from user sessions"]
 end
-subgraph "AGTX"
-APP["App"]
-OPS["TmuxOperations"]
-AGOPS["AgentOperations"]
+subgraph "Per-project session"
+PROJ["Project session<br/>(project-safe name)"]
 end
-APP --> OPS
-OPS --> S
-S --> SES
-SES --> WIN
-WIN --> PANE
-APP --> AGOPS
-AGOPS --> PANE
+subgraph "Per-task windows"
+WIN1["Window 'task-{id}--{project}--{slug}'"]
+WIN2["Window 'task-{id2}--{project}--{slug}'"]
+end
+subgraph "Monitoring and UI"
+CAPTURE["Pane capture and trimming"]
+POPUP["Inline shell popup"]
+ATTACH["Fullscreen attach"]
+IDLE["Idle detection and phase status"]
+end
+AGTX --> PROJ
+PROJ --> WIN1
+PROJ --> WIN2
+CAPTURE --> IDLE
+IDLE --> POPUP
+IDLE --> ATTACH
 ```
 
 **Diagram sources**
-- [mod.rs:11-188](file://src/tmux/mod.rs#L11-L188)
-- [operations.rs:61-248](file://src/tmux/operations.rs#L61-L248)
-- [app.rs:6525-6571](file://src/tui/app.rs#L6525-L6571)
-- [operations.rs:55-108](file://src/agent/operations.rs#L55-L108)
+- [src/tmux/mod.rs:11-189](file://src/tmux/mod.rs#L11-L189)
+- [src/tui/app.rs:6831-6890](file://src/tui/app.rs#L6831-L6890)
+- [src/tui/shell_popup.rs:132-211](file://src/tui/shell_popup.rs#L132-L211)
 
 ## Detailed Component Analysis
 
-### tmux Server and Session Management
-- Server name: All agent sessions run under a dedicated server named for AGTX.
-- Project sessions: On project load, the application ensures a project-level session exists; if missing, it is created.
-- Task windows: Each task gets a window within the project session, with the window name derived from the task and project identifiers.
-- Recovery: If a task window disappears (server restart, manual kill), the application can recreate it using the agent’s resume command.
+### tmux Server and Naming Conventions
+- Dedicated server: All agent sessions are created and managed under a fixed server name to prevent interference with user tmux sessions.
+- Safe project names: Project names are sanitized to produce valid tmux session names.
+- Session naming scheme: Windows use a structured naming convention encoding task ID, project, and slug, enabling parsing and recovery.
+
+```mermaid
+flowchart TD
+Start(["Sanitize project name"]) --> Slug["Replace invalid chars with '-'<br/>Collapse and trim"]
+Slug --> Empty{"Empty result?"}
+Empty --> |Yes| Default["Use default 'project'"]
+Empty --> |No| UseSlug["Use sanitized slug"]
+Default --> End(["Safe session name"])
+UseSlug --> End
+```
+
+**Diagram sources**
+- [src/tmux/mod.rs:144-166](file://src/tmux/mod.rs#L144-L166)
+
+**Section sources**
+- [src/tmux/mod.rs:11-189](file://src/tmux/mod.rs#L11-L189)
+
+### Session Lifecycle Management
+Lifecycle from creation to completion and cleanup:
+- Ensure project session exists at startup and during task setup.
+- Recover missing task windows after tmux restarts or manual kills.
+- Monitor pane content to detect phase completion and idle states.
+- Clean up transition requests and other artifacts post-completion.
 
 ```mermaid
 sequenceDiagram
-participant App as "App"
-participant Ops as "TmuxOperations"
-participant Tmux as "tmux 'agtx'"
-participant Proj as "Project Session"
-participant Win as "Task Window"
-App->>Ops : has_session(project)
-alt session missing
-App->>Ops : create_session(project, cwd)
-Ops->>Tmux : new-session -d -s project -c cwd
-Tmux-->>Ops : ok
-else exists
-Ops-->>App : true
+participant UI as "TUI App"
+participant OPS as "TmuxOperations"
+participant TMUX as "tmux 'agtx' server"
+UI->>OPS : ensure_project_tmux_session(name, path)
+OPS->>TMUX : create_session(name, path)
+TMUX-->>OPS : success/failure
+UI->>OPS : create_window(session, name, dir, cmd, keep_shell)
+OPS->>TMUX : new-window -d -t {session} : -n name -c dir sh -c cmd
+TMUX-->>OPS : success/failure
+loop Periodic monitoring
+UI->>OPS : capture_pane_with_history(target, N)
+OPS->>TMUX : capture-pane -p -e -J -S -N
+TMUX-->>OPS : bytes
+OPS-->>UI : content
+UI->>UI : compute phase status (Working/Idle/Ready/Exited)
 end
-App->>Ops : create_window(project, window, cwd, cmd, keep_shell)
-Ops->>Tmux : new-window -d -t project : window -n window -c cwd sh -c "cmd"
-Tmux-->>Ops : ok
-Ops-->>App : ok
-App->>Win : window_exists(project : window)
-Win-->>App : true
+UI->>OPS : kill_window(target)
+OPS->>TMUX : kill-window -t target
+TMUX-->>OPS : success
 ```
 
 **Diagram sources**
-- [app.rs:6525-6534](file://src/tui/app.rs#L6525-L6534)
-- [operations.rs:61-110](file://src/tmux/operations.rs#L61-L110)
-- [mod.rs:233-247](file://src/tmux/mod.rs#L233-L247)
+- [src/tui/app.rs:816-820](file://src/tui/app.rs#L816-L820)
+- [src/tui/app.rs:909-943](file://src/tui/app.rs#L909-L943)
+- [src/tui/app.rs:7334-7350](file://src/tui/app.rs#L7334-L7350)
+- [src/tmux/operations.rs:64-110](file://src/tmux/operations.rs#L64-L110)
+- [src/tmux/operations.rs:174-182](file://src/tmux/operations.rs#L174-L182)
 
 **Section sources**
-- [mod.rs:11-188](file://src/tmux/mod.rs#L11-L188)
-- [operations.rs:61-110](file://src/tmux/operations.rs#L61-L110)
-- [app.rs:6525-6571](file://src/tui/app.rs#L6525-L6571)
+- [src/tui/app.rs:816-820](file://src/tui/app.rs#L816-L820)
+- [src/tui/app.rs:909-943](file://src/tui/app.rs#L909-L943)
+- [src/tui/app.rs:6831-6890](file://src/tui/app.rs#L6831-L6890)
+- [src/tui/app.rs:7334-7350](file://src/tui/app.rs#L7334-L7350)
+- [src/tmux/operations.rs:64-110](file://src/tmux/operations.rs#L64-L110)
+- [src/tmux/operations.rs:174-182](file://src/tmux/operations.rs#L174-L182)
 
-### Task Windows and Persistent Sessions
-- Window naming: Windows are created per task; the application ensures the project session exists before creating windows.
-- Working directories: Windows are initialized with the task’s worktree path.
-- Resume capability: When a task window is missing, the application can recreate it using the agent’s resume command, preserving the task’s context.
+### Persistent Agent Workflows and Seamless Switching
+- Persistent context: Agent sessions remain alive across phase transitions, preserving state and logs.
+- Recovery: On startup, the app detects missing task windows and recreates them using stored metadata.
+- Orchestrator persistence: An orchestrator session can be re-detected and re-attached to maintain continuous supervision.
 
 ```mermaid
-flowchart TD
-Start(["Task Setup"]) --> Ensure["Ensure project session exists"]
-Ensure --> CreateWin["Create task window with agent command"]
-CreateWin --> Persist["Window persists across agent runs"]
-Persist --> Lost{"Window lost?"}
-Lost --> |Yes| Resume["Recreate window using agent resume command"]
-Lost --> |No| Done(["Task continues"])
-Resume --> Done
+sequenceDiagram
+participant App as "TUI App"
+participant DB as "Database"
+participant OPS as "TmuxOperations"
+App->>DB : Load tasks with session_name and worktree_path
+App->>OPS : window_exists(session_name?)
+alt Window missing
+App->>OPS : create_window(session, name, dir, cmd, keep_shell)
+OPS-->>App : success
+else Window exists
+App->>App : Continue with existing session
+end
 ```
 
 **Diagram sources**
-- [app.rs:6539-6571](file://src/tui/app.rs#L6539-L6571)
-- [operations.rs:61-110](file://src/tmux/operations.rs#L61-L110)
-- [agent.rs:36-48](file://src/agent/mod.rs#L36-L48)
+- [src/tui/app.rs:909-943](file://src/tui/app.rs#L909-L943)
+- [src/tui/app.rs:6845-6868](file://src/tui/app.rs#L6845-L6868)
+- [src/tmux/operations.rs:112-126](file://src/tmux/operations.rs#L112-L126)
 
 **Section sources**
-- [app.rs:6539-6571](file://src/tui/app.rs#L6539-L6571)
-- [agent.rs:36-48](file://src/agent/mod.rs#L36-L48)
+- [src/tui/app.rs:909-943](file://src/tui/app.rs#L909-L943)
+- [src/tui/app.rs:6845-6868](file://src/tui/app.rs#L6845-L6868)
 
-### Agent Pane Monitoring and Idle Detection
-- Real-time pane capture: The UI captures pane content with history and trims to the cursor position to avoid rendering unused buffer.
-- Content hashing: The application hashes pane content to detect when it stabilizes, indicating potential idleness.
-- Readiness gating: Before sending prompts or skills, the application waits for the agent to reach a ready state using either explicit indicators or content stability heuristics.
-- Orchestrator notifications: The orchestrator pane is monitored separately; notifications are delivered only when the orchestrator is idle.
-
-```mermaid
-flowchart TD
-Start(["Monitor Task Pane"]) --> Capture["Capture pane with history"]
-Capture --> Hash["Compute content hash"]
-Hash --> Changed{"Hash changed?"}
-Changed --> |Yes| Reset["Reset hash and timer"]
-Changed --> |No| Stable["Check stability threshold"]
-Stable --> |Not stable| Wait["Wait for more stability"]
-Stable --> |Stable| Idle["Mark task as Idle"]
-Idle --> Notify["Send notifications (if applicable)"]
-Reset --> Wait
-Wait --> Capture
-```
-
-**Diagram sources**
-- [app.rs:7028-7042](file://src/tui/app.rs#L7028-L7042)
-- [app.rs:6218-6244](file://src/tui/app.rs#L6218-L6244)
-- [app.rs:8437-8512](file://src/tui/app.rs#L8437-L8512)
-
-**Section sources**
-- [app.rs:7028-7042](file://src/tui/app.rs#L7028-L7042)
-- [app.rs:6218-6244](file://src/tui/app.rs#L6218-L6244)
-- [app.rs:8437-8512](file://src/tui/app.rs#L8437-L8512)
-
-### Practical tmux Workflows
-- Opening task popups: The UI renders a shell popup capturing pane history and trimming to the cursor; this enables real-time viewing of agent output without leaving the terminal UI.
-- Attaching to sessions: The application can attach to a task window for full-screen terminal interaction, regardless of whether the user is currently inside tmux.
-- Sending keys: Keyboard input is translated into tmux send-keys commands, including Alt-modified keys and special keys.
+### Fullscreen Attachment and Inline Task Popup
+- Fullscreen attachment: Users can attach directly to a task’s tmux session for uninterrupted interaction.
+- Inline popup: When not fullscreen-attaching, the TUI renders a popup containing recent pane content with scrolling and cursor-aware trimming.
 
 ```mermaid
 sequenceDiagram
 participant User as "User"
-participant App as "App"
-participant Ops as "TmuxOperations"
-participant Tmux as "tmux 'agtx'"
-participant Pane as "Target Pane"
-User->>App : Open task popup
-App->>Ops : capture_pane_with_history(window, N)
-Ops->>Tmux : capture-pane -p -e -J -S -N
-Tmux-->>Ops : bytes
-Ops-->>App : bytes
-App->>Pane : send_keys_literal(keys)
-Pane-->>User : Live output updates
-User->>App : Attach to session
-App->>Ops : attach(target)
-Ops->>Tmux : attach -t target
-Tmux-->>User : Fullscreen session
+participant UI as "TUI App"
+participant OPS as "TmuxOperations"
+participant TMUX as "tmux 'agtx' server"
+User->>UI : Press C-f or open task popup
+alt Fullscreen attach
+UI->>TMUX : attach -t session
+TMUX-->>User : Interactive session
+else Inline popup
+UI->>OPS : capture_pane_with_history(target, N)
+OPS->>TMUX : capture-pane -p -e -J -S -N
+TMUX-->>OPS : bytes
+OPS-->>UI : content
+UI->>UI : trim_to_cursor + compute visible lines
+UI-->>User : Render popup with footer controls
+end
 ```
 
 **Diagram sources**
-- [app.rs:7028-7042](file://src/tui/app.rs#L7028-L7042)
-- [app.rs:7164-7200](file://src/tui/app.rs#L7164-L7200)
-- [mod.rs:123-131](file://src/tmux/mod.rs#L123-L131)
-- [operations.rs:138-146](file://src/tmux/operations.rs#L138-L146)
+- [src/tui/app.rs:1168-1174](file://src/tui/app.rs#L1168-L1174)
+- [src/tui/shell_popup.rs:132-211](file://src/tui/shell_popup.rs#L132-L211)
+- [src/tmux/operations.rs:174-182](file://src/tmux/operations.rs#L174-L182)
+- [src/tmux/mod.rs:120-131](file://src/tmux/mod.rs#L120-L131)
 
 **Section sources**
-- [app.rs:7028-7042](file://src/tui/app.rs#L7028-L7042)
-- [app.rs:7164-7200](file://src/tui/app.rs#L7164-L7200)
-- [mod.rs:123-131](file://src/tmux/mod.rs#L123-L131)
+- [src/tui/app.rs:1168-1174](file://src/tui/app.rs#L1168-L1174)
+- [src/tui/shell_popup.rs:132-211](file://src/tui/shell_popup.rs#L132-L211)
+- [src/tmux/mod.rs:120-131](file://src/tmux/mod.rs#L120-L131)
 
-### tmux Configuration Options and Environment
-- Server isolation: All agent sessions run under a dedicated server to prevent interference with user sessions.
-- Session naming: Project names are sanitized to produce valid tmux session names.
-- Window and pane controls: The operations layer exposes resizing, cursor info retrieval, and current command detection for pane diagnostics.
+### Pane Capture and Monitoring System
+- Capture pane content with history for robust analysis.
+- Trim content to cursor position to avoid capturing empty buffer space.
+- Compute visible lines for efficient rendering in the popup.
+- Track content hashes and timestamps to detect idle and readiness.
+
+```mermaid
+flowchart TD
+Start(["Capture pane with history"]) --> Bytes["Raw bytes from tmux"]
+Bytes --> Trim["Trim to cursor position"]
+Trim --> Lines["Split into styled lines"]
+Lines --> Visible["Compute visible lines for popup"]
+Visible --> Hash["Compute content hash and timestamp"]
+Hash --> Status["Update phase status cache"]
+Status --> End(["Render or attach as appropriate"])
+```
+
+**Diagram sources**
+- [src/tui/shell_popup.rs:132-211](file://src/tui/shell_popup.rs#L132-L211)
+- [src/tui/app.rs:7334-7350](file://src/tui/app.rs#L7334-L7350)
 
 **Section sources**
-- [mod.rs:11-188](file://src/tmux/mod.rs#L11-L188)
-- [operations.rs:48-59](file://src/tmux/operations.rs#L48-L59)
-- [operations.rs:203-229](file://src/tmux/operations.rs#L203-L229)
+- [src/tui/shell_popup.rs:132-211](file://src/tui/shell_popup.rs#L132-L211)
+- [src/tui/app.rs:7334-7350](file://src/tui/app.rs#L7334-L7350)
+
+### MCP Integration for External Control
+- Read pane content: Retrieve recent pane output for diagnostics or automation.
+- Send to task: Inject keystrokes into a task’s agent pane to guide or nudge the agent.
+
+```mermaid
+sequenceDiagram
+participant Client as "External Client"
+participant MCP as "MCP Server"
+participant TMUX as "tmux 'agtx' server"
+Client->>MCP : read_pane(task_id, lines?)
+MCP->>TMUX : capture-pane -t session -p -S -N
+TMUX-->>MCP : content
+MCP-->>Client : JSON response with content
+Client->>MCP : send_to_task(task_id, message)
+MCP->>TMUX : send-keys -t session message Enter
+TMUX-->>MCP : success
+MCP-->>Client : Acknowledgment
+```
+
+**Diagram sources**
+- [src/mcp/server.rs:108-959](file://src/mcp/server.rs#L108-L959)
+
+**Section sources**
+- [src/mcp/server.rs:108-959](file://src/mcp/server.rs#L108-L959)
 
 ## Dependency Analysis
 The tmux integration relies on a clean separation of concerns:
-- Low-level CLI wrappers encapsulate tmux commands.
-- An injectable operations trait abstracts tmux interactions for testability and flexibility.
-- The TUI orchestrates lifecycle events (session creation, window creation, pane monitoring) and delegates tmux operations to the injected implementation.
-- Agent operations supply the commands and resume logic needed to bootstrap agent sessions.
+- Public API module exposes high-level functions for spawning, listing, attaching, and killing sessions.
+- Operations trait abstracts tmux commands for testability and runtime substitution.
+- TUI module orchestrates lifecycle, monitoring, and user interaction.
+- MCP module provides external control and inspection.
+- Configuration module influences behavior such as fullscreen-on-enter.
 
 ```mermaid
-classDiagram
-class TmuxOperations {
-<<trait>>
-+create_window(session, window_name, cwd, command, keep_shell_on_exit)
-+kill_window(target)
-+window_exists(target)
-+send_keys(target, keys)
-+send_keys_literal(target, keys)
-+paste_text(target, text)
-+capture_pane(target)
-+capture_pane_with_history(target, N)
-+get_cursor_info(target)
-+resize_window(target, w, h)
-+pane_current_command(target)
-+has_session(session)
-+create_session(session, cwd)
-}
-class RealTmuxOps {
-+create_window(...)
-+kill_window(...)
-+window_exists(...)
-+send_keys(...)
-+send_keys_literal(...)
-+paste_text(...)
-+capture_pane(...)
-+capture_pane_with_history(...)
-+get_cursor_info(...)
-+resize_window(...)
-+pane_current_command(...)
-+has_session(...)
-+create_session(...)
-}
-class App {
-+ensure_project_tmux_session(...)
-+recover_task_session(...)
-+capture_tmux_pane_with_history(...)
-+wait_for_agent_ready(...)
-}
-TmuxOperations <|.. RealTmuxOps
-App --> TmuxOperations : "uses"
+graph LR
+TMOD["tmux/mod.rs"] --> TOPS["tmux/operations.rs"]
+TOPS --> APP["tui/app.rs"]
+TOPS --> MCP["mcp/server.rs"]
+APP --> CFG["config/mod.rs"]
+APP --> SP["tui/shell_popup.rs"]
 ```
 
 **Diagram sources**
-- [operations.rs:8-59](file://src/tmux/operations.rs#L8-L59)
-- [operations.rs:61-248](file://src/tmux/operations.rs#L61-L248)
-- [app.rs:6525-6571](file://src/tui/app.rs#L6525-L6571)
-- [app.rs:7028-7042](file://src/tui/app.rs#L7028-L7042)
-- [app.rs:8437-8512](file://src/tui/app.rs#L8437-L8512)
+- [src/tmux/mod.rs:1-189](file://src/tmux/mod.rs#L1-L189)
+- [src/tmux/operations.rs:1-249](file://src/tmux/operations.rs#L1-L249)
+- [src/tui/app.rs:1-120](file://src/tui/app.rs#L1-L120)
+- [src/tui/shell_popup.rs:1-326](file://src/tui/shell_popup.rs#L1-L326)
+- [src/mcp/server.rs:108-959](file://src/mcp/server.rs#L108-L959)
+- [src/config/mod.rs:23-35](file://src/config/mod.rs#L23-L35)
 
 **Section sources**
-- [operations.rs:8-59](file://src/tmux/operations.rs#L8-L59)
-- [operations.rs:61-248](file://src/tmux/operations.rs#L61-L248)
-- [app.rs:6525-6571](file://src/tui/app.rs#L6525-L6571)
-- [app.rs:7028-7042](file://src/tui/app.rs#L7028-L7042)
-- [app.rs:8437-8512](file://src/tui/app.rs#L8437-L8512)
+- [src/tmux/mod.rs:1-189](file://src/tmux/mod.rs#L1-L189)
+- [src/tmux/operations.rs:1-249](file://src/tmux/operations.rs#L1-L249)
+- [src/tui/app.rs:1-120](file://src/tui/app.rs#L1-L120)
+- [src/tui/shell_popup.rs:1-326](file://src/tui/shell_popup.rs#L1-L326)
+- [src/mcp/server.rs:108-959](file://src/mcp/server.rs#L108-L959)
+- [src/config/mod.rs:23-35](file://src/config/mod.rs#L23-L35)
 
 ## Performance Considerations
-- History capture limits: Capturing large histories can be expensive; limit history lines for popup rendering and pane monitoring.
-- Content hashing: Use periodic hashing and stable thresholds to avoid frequent recomputation.
-- Concurrency: Background threads handle long-running operations (e.g., merge conflict checks) to keep the UI responsive.
-- Server isolation: Using a dedicated server avoids contention with user sessions and reduces overhead.
+- Minimize tmux invocations: Batch operations and reuse captured content when possible.
+- Limit pane capture size: Use reasonable history limits to balance observability and performance.
+- Efficient trimming: Trim to cursor and trailing empty lines to reduce rendering overhead.
+- Non-blocking monitoring: Use background threads or channels for periodic pane capture and status updates.
+- Window reuse: Prefer reusing existing windows to avoid frequent creation/destruction overhead.
 
 ## Troubleshooting Guide
-- tmux connectivity issues:
-  - Verify the dedicated server is running and accessible.
-  - Confirm that tmux is installed and the server name matches the expected value.
-  - Check for permission or environment issues when invoking tmux commands.
-
-- Session cleanup problems:
-  - If a task window disappears unexpectedly, the application attempts to recover it using the agent’s resume command.
-  - Ensure the task’s worktree still exists; otherwise, recovery is not possible.
-
-- Performance optimization tips:
-  - Limit pane history captured for popups to reduce memory and CPU usage.
-  - Adjust idle detection thresholds to balance responsiveness and accuracy.
-  - Prefer targeted pane capture and cursor-aware trimming to minimize unnecessary data processing.
+Common issues and resolutions:
+- tmux server not running: Ensure the dedicated server is started before operations. The public API checks for server existence implicitly through command responses.
+- Session/window missing: The app recovers missing windows on startup by checking existing tasks and recreating windows as needed.
+- Permission errors: Verify the user has permission to create and manage sessions on the dedicated server.
+- Argument quoting failures: The spawn function properly escapes arguments; verify agent commands and arguments passed to it.
+- MCP send_to_task failures: Confirm the task is in an active phase and has an associated session name.
 
 **Section sources**
-- [app.rs:7028-7042](file://src/tui/app.rs#L7028-L7042)
-- [app.rs:6539-6571](file://src/tui/app.rs#L6539-L6571)
-- [mod.rs:11-188](file://src/tmux/mod.rs#L11-L188)
+- [src/tui/app.rs:909-943](file://src/tui/app.rs#L909-L943)
+- [src/mcp/server.rs:912-959](file://src/mcp/server.rs#L912-L959)
+
+## Security Considerations
+- Isolation: Use the dedicated server to prevent interference with user sessions and limit blast radius.
+- Credential handling: Avoid embedding secrets in agent commands or pane content. If credentials are required, pass them via secure environment variables or configuration files with restricted permissions.
+- Input sanitization: The spawn function escapes arguments to prevent shell injection; ensure external inputs are validated before constructing commands.
+- Access control: Restrict who can attach to sessions or send keystrokes. Consider gating access through MCP with authentication and authorization.
+
+## Customization and Integration
+- Configuration options:
+  - fullscreen_on_enter: Controls whether opening a task defaults to fullscreen attach or inline popup.
+- Integration patterns:
+  - External tools can use MCP endpoints to read pane content or send keystrokes to agent panes.
+  - The operations trait allows substituting mock implementations for testing or alternate backends.
+- Best practices:
+  - Keep agent commands deterministic and idempotent where possible.
+  - Use structured logging in agent panes to facilitate pane capture and monitoring.
+  - Employ consistent naming conventions for sessions and windows to simplify recovery and automation.
+
+**Section sources**
+- [src/config/mod.rs:23-35](file://src/config/mod.rs#L23-L35)
+- [src/mcp/server.rs:108-959](file://src/mcp/server.rs#L108-L959)
+- [src/tmux/operations.rs:1-249](file://src/tmux/operations.rs#L1-249)
 
 ## Conclusion
-AGTX’s tmux integration provides a robust foundation for persistent, isolated agent sessions. By organizing projects into dedicated sessions and tasks into windows, and by monitoring pane activity to gate agent readiness, AGTX delivers a reliable environment for multi-phase development workflows. The modular design supports testing and customization, while practical UI features enable seamless interaction with agent sessions.
+The tmux integration provides a robust, persistent, and observable environment for agent-driven workflows. By isolating sessions on a dedicated server, structuring per-project and per-task sessions, and combining continuous pane monitoring with flexible UI modes, the system supports seamless agent switching, reliable lifecycle management, and powerful external control via MCP.

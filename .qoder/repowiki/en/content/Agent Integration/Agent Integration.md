@@ -2,18 +2,20 @@
 
 <cite>
 **Referenced Files in This Document**
-- [README.md](file://README.md)
 - [AGENTS.md](file://AGENTS.md)
 - [CLAUDE.md](file://CLAUDE.md)
 - [src/agent/mod.rs](file://src/agent/mod.rs)
 - [src/agent/operations.rs](file://src/agent/operations.rs)
+- [src/config/mod.rs](file://src/config/mod.rs)
 - [src/skills.rs](file://src/skills.rs)
 - [plugins/agtx/plugin.toml](file://plugins/agtx/plugin.toml)
 - [plugins/agent-skills/plugin.toml](file://plugins/agent-skills/plugin.toml)
 - [plugins/gsd/plugin.toml](file://plugins/gsd/plugin.toml)
+- [plugins/spec-kit/plugin.toml](file://plugins/spec-kit/plugin.toml)
 - [plugins/openspec/plugin.toml](file://plugins/openspec/plugin.toml)
-- [plugins/bmad/plugin.toml](file://plugins/bmad/plugin.toml)
 - [plugins/superpowers/plugin.toml](file://plugins/superpowers/plugin.toml)
+- [plugins/bmad/plugin.toml](file://plugins/bmad/plugin.toml)
+- [plugins/void/plugin.toml](file://plugins/void/plugin.toml)
 </cite>
 
 ## Table of Contents
@@ -29,329 +31,408 @@
 10. [Appendices](#appendices)
 
 ## Introduction
-This document explains how AGTX coordinates multiple AI coding agents in parallel. It covers supported agents, the agent command transformation system, per-phase agent configuration, practical multi-agent workflows, agent-specific considerations, troubleshooting, and the agent skill deployment system.
+This document explains how agtx integrates with AI coding agents and manages skill transformations across platforms. It covers:
+- Agent detection and configuration for Claude Code, Codex, Gemini CLI, OpenCode, Cursor, and Copilot
+- The skill transformation system that maps canonical commands into agent-specific invocation formats
+- Multi-agent workflow configuration with per-phase agent selection and automatic session switching
+- The agent registry and command construction patterns
+- Compatibility matrices and limitations for plugins and agents
+- Troubleshooting guidance for agent-specific issues, skill deployment, and session management
+- Best practices for optimal performance across platforms
 
 ## Project Structure
-At a high level, AGTX orchestrates tasks across phases (Backlog → Planning → Running → Review → Done), each running in its own tmux window and git worktree. Plugins define commands, prompts, and artifacts per phase. Skills are deployed to agent-native discovery paths and commands are transformed per agent.
+The agent integration spans several modules:
+- Agent detection and command building live in the agent module
+- The agent registry resolves the appropriate agent per workflow phase
+- Skill transformation utilities convert canonical commands to agent-native forms
+- Plugin configurations define supported agents, commands, prompts, and artifact lifecycles
 
 ```mermaid
 graph TB
-subgraph "CLI and TUI"
-A["CLI entry point<br/>and AppMode routing"]
-B["TUI app<br/>(board, popups, key handling)"]
+subgraph "Agent Layer"
+A_mod["src/agent/mod.rs<br/>Agent, detection, commands"]
+A_ops["src/agent/operations.rs<br/>AgentOperations, CodingAgent, Registry"]
 end
-subgraph "Core Services"
-C["Agent registry<br/>(per-phase selection)"]
-D["Skill deployment<br/>(agent-native paths)"]
-E["MCP server<br/>(JSON-RPC over stdio)"]
+subgraph "Config Layer"
+C_cfg["src/config/mod.rs<br/>GlobalConfig, ProjectConfig, WorkflowPlugin"]
 end
-subgraph "Execution"
-F["tmux server 'agtx'<br/>(sessions/windows)"]
-G["git worktrees<br/>(per task)"]
+subgraph "Skills Layer"
+S_api["src/skills.rs<br/>Skill dirs, transformations, scanning"]
 end
-A --> B
-B --> C
-B --> D
-B --> E
-C --> F
-D --> F
-F --> G
+subgraph "Plugins"
+P_agtx["plugins/agtx/plugin.toml"]
+P_gsd["plugins/gsd/plugin.toml"]
+P_spec["plugins/spec-kit/plugin.toml"]
+P_openspec["plugins/openspec/plugin.toml"]
+P_super["plugins/superpowers/plugin.toml"]
+P_bmad["plugins/bmad/plugin.toml"]
+P_void["plugins/void/plugin.toml"]
+P_agent_skills["plugins/agent-skills/plugin.toml"]
+end
+A_ops --> A_mod
+S_api --> A_mod
+C_cfg --> A_ops
+C_cfg --> S_api
+P_agtx --> C_cfg
+P_gsd --> C_cfg
+P_spec --> C_cfg
+P_openspec --> C_cfg
+P_super --> C_cfg
+P_bmad --> C_cfg
+P_void --> C_cfg
+P_agent_skills --> C_cfg
 ```
 
 **Diagram sources**
-- [CLAUDE.md: Architecture:23-92](file://CLAUDE.md#L23-L92)
-- [README.md: Architecture:506-547](file://README.md#L506-L547)
+- [src/agent/mod.rs:1-171](file://src/agent/mod.rs#L1-L171)
+- [src/agent/operations.rs:1-163](file://src/agent/operations.rs#L1-L163)
+- [src/config/mod.rs:1-595](file://src/config/mod.rs#L1-L595)
+- [src/skills.rs:1-409](file://src/skills.rs#L1-L409)
+- [plugins/agtx/plugin.toml:1-16](file://plugins/agtx/plugin.toml#L1-L16)
+- [plugins/gsd/plugin.toml:1-34](file://plugins/gsd/plugin.toml#L1-L34)
+- [plugins/spec-kit/plugin.toml:1-21](file://plugins/spec-kit/plugin.toml#L1-L21)
+- [plugins/openspec/plugin.toml:1-21](file://plugins/openspec/plugin.toml#L1-L21)
+- [plugins/superpowers/plugin.toml:1-16](file://plugins/superpowers/plugin.toml#L1-L16)
+- [plugins/bmad/plugin.toml:1-22](file://plugins/bmad/plugin.toml#L1-L22)
+- [plugins/void/plugin.toml:1-4](file://plugins/void/plugin.toml#L1-L4)
+- [plugins/agent-skills/plugin.toml:1-19](file://plugins/agent-skills/plugin.toml#L1-L19)
 
 **Section sources**
-- [CLAUDE.md: Architecture:23-92](file://CLAUDE.md#L23-L92)
-- [README.md: Architecture:506-547](file://README.md#L506-L547)
+- [AGENTS.md:1-61](file://AGENTS.md#L1-L61)
+- [CLAUDE.md](file://CLAUDE.md)
 
 ## Core Components
-- Agent detection and spawning: Known agents are defined and detected; interactive/resume commands are constructed per agent.
-- Agent registry: Provides per-phase agent selection with a default fallback.
-- Command transformation: Canonical commands are transformed to agent-specific formats.
-- Skill deployment: Built-in and plugin skills are deployed to agent-native discovery paths.
-- Plugins: Define commands, prompts, artifacts, and gating per phase.
+- Agent detection and availability: Known agents are defined and filtered by system presence. Detection builds a list of available agents.
+- Agent command construction: Interactive and resume commands are tailored per agent, including platform-specific flags and modes.
+- Agent registry: A registry maps agent names to implementations of AgentOperations, with a default fallback.
+- Multi-phase agent selection: Global and project configurations support per-phase agent overrides.
+- Skill transformation: Canonical commands are transformed into agent-native invocation formats.
+- Plugin compatibility: Plugins declare supported agents and define commands/prompts/artifacts.
 
 **Section sources**
-- [src/agent/mod.rs: Known agents and command builders:10-122](file://src/agent/mod.rs#L10-L122)
-- [src/agent/operations.rs: Agent registry and orchestrator command:110-162](file://src/agent/operations.rs#L110-L162)
-- [src/skills.rs: Command transformation and skill deployment:31-115](file://src/skills.rs#L31-L115)
+- [src/agent/mod.rs:10-171](file://src/agent/mod.rs#L10-L171)
+- [src/agent/operations.rs:17-163](file://src/agent/operations.rs#L17-L163)
+- [src/config/mod.rs:5-595](file://src/config/mod.rs#L5-L595)
+- [src/skills.rs:31-115](file://src/skills.rs#L31-L115)
+- [plugins/gsd/plugin.toml:4](file://plugins/gsd/plugin.toml#L4)
+- [plugins/superpowers/plugin.toml:3](file://plugins/superpowers/plugin.toml#L3)
 
 ## Architecture Overview
-AGTX integrates agents by:
-- Detecting available agents and constructing appropriate interactive/resume commands.
-- Deploying skills to agent-native discovery locations in each worktree.
-- Transforming canonical commands into agent-specific invocations.
-- Managing tmux windows per task and git worktrees per phase.
-- Using MCP to expose board tools to agents (for orchestrator and skills).
+The agent integration architecture connects configuration, agent detection, registry resolution, and skill transformation to orchestrate multi-agent workflows.
 
 ```mermaid
 sequenceDiagram
 participant User as "User"
-participant TUI as "TUI"
-participant Reg as "AgentRegistry"
-participant Agent as "AgentOperations"
-participant TMUX as "tmux window"
-participant Skill as "Skill Deployment"
-User->>TUI : "Advance task to Planning"
-TUI->>Reg : "get(phase)"
-Reg-->>TUI : "AgentOperations"
-TUI->>Agent : "build_interactive_command()"
-Agent-->>TUI : "Shell command"
-TUI->>TMUX : "Send command to pane"
-TUI->>Skill : "Deploy skills to agent-native paths"
-TMUX-->>TUI : "Agent output and prompts"
-TUI->>TUI : "Poll artifacts and update state"
+participant Config as "MergedConfig"
+participant Registry as "RealAgentRegistry"
+participant AgentOps as "AgentOperations"
+participant Agent as "Agent (CLI)"
+participant Skills as "Skill Transformer"
+User->>Config : Select phase (research/planning/running/review)
+Config->>Config : Resolve agent_for_phase(phase)
+Config-->>Registry : Request agent name
+Registry->>Registry : get(agent_name)
+Registry-->>AgentOps : Arc<AgentOperations>
+AgentOps->>Skills : transform_plugin_command(canonical)
+Skills-->>AgentOps : agent-native command
+AgentOps->>Agent : build_interactive_command(prompt)
+Agent-->>User : Session launched
 ```
 
 **Diagram sources**
-- [src/agent/operations.rs: Agent registry and commands:110-162](file://src/agent/operations.rs#L110-L162)
-- [src/skills.rs: Skill deployment and transformations:31-115](file://src/skills.rs#L31-L115)
-- [CLAUDE.md: Session persistence and tmux:148-190](file://CLAUDE.md#L148-L190)
-
-**Section sources**
-- [src/agent/operations.rs: Agent registry and orchestrator command:110-162](file://src/agent/operations.rs#L110-L162)
-- [src/skills.rs: Skill deployment and transformations:31-115](file://src/skills.rs#L31-L115)
-- [CLAUDE.md: Session persistence and tmux:148-190](file://CLAUDE.md#L148-L190)
+- [src/config/mod.rs:390-408](file://src/config/mod.rs#L390-L408)
+- [src/agent/operations.rs:113-162](file://src/agent/operations.rs#L113-L162)
+- [src/skills.rs:83-115](file://src/skills.rs#L83-L115)
+- [src/agent/mod.rs:36-77](file://src/agent/mod.rs#L36-L77)
 
 ## Detailed Component Analysis
 
-### Supported Agents
-AGTX supports the following agents: Claude Code, Codex, Gemini CLI, Cursor Agent, Copilot, and OpenCode. Each agent’s interactive/resume command and capability are defined in the agent module.
-
-- Interactive command construction and resume command construction are implemented per agent.
-- Availability detection uses the system PATH for each agent binary.
-
-Capabilities and limitations:
-- Claude and Gemini support agent-native skills and interactive commands.
-- Codex uses a dollar-prefixed skill invocation format and SKILL.md files in skill directories.
-- Cursor uses SKILL.md files in a skills directory and invokes skills with a leading slash.
-- Copilot does not support interactive skill invocation; prompts are handled without commands.
-- OpenCode uses a flat command directory and a dash-based naming convention.
-
-**Section sources**
-- [src/agent/mod.rs: Known agents and command builders:10-122](file://src/agent/mod.rs#L10-L122)
-- [src/agent/mod.rs: Interactive and resume command builders:36-76](file://src/agent/mod.rs#L36-L76)
-- [src/skills.rs: Agent-native skill directories and command formats:31-81](file://src/skills.rs#L31-L81)
-
-### Agent Command Transformation System
-Canonical commands are written once in plugin TOML using a namespace and command format. AGTX transforms them per agent:
-- Claude/Gemini: Unchanged.
-- OpenCode/Cursor: Colon replaced with a hyphen.
-- Codex: Slash replaced with a dollar sign, and colon replaced with a hyphen.
-- Copilot: No interactive skill invocation (prompt only).
+### Agent Detection and Configuration
+- Known agents include Claude, Codex, Copilot, Gemini, OpenCode, and Cursor. Availability is checked via system PATH.
+- Resume and interactive command builders tailor flags per agent (e.g., permissions, approval modes, continue/resume).
+- Agent selection parsing supports default-first selection and numeric indices.
 
 ```mermaid
 flowchart TD
-Start(["Canonical command"]) --> CheckAgent{"Agent type"}
-CheckAgent --> |Claude/Gemini| Keep["Unchanged"]
-CheckAgent --> |OpenCode/Cursor| Hyphen["Replace ':' with '-' once"]
-CheckAgent --> |Codex| Dollar["Prefix '$' after replacing ':' with '-'"]
-CheckAgent --> |Copilot| Skip["No interactive command"]
-Keep --> End(["Agent-specific command"])
-Hyphen --> End
-Dollar --> End
-Skip --> End
+Start(["Detect Agents"]) --> LoadKnown["Load known_agents()"]
+LoadKnown --> FilterAvail{"is_available()?"}
+FilterAvail --> |Yes| AddList["Add to available list"]
+FilterAvail --> |No| Skip["Skip agent"]
+AddList --> Done(["Available agents"])
+Skip --> Done
 ```
 
 **Diagram sources**
-- [src/skills.rs: transform_plugin_command:93-115](file://src/skills.rs#L93-L115)
+- [src/agent/mod.rs:80-130](file://src/agent/mod.rs#L80-L130)
 
 **Section sources**
-- [src/skills.rs: transform_plugin_command:93-115](file://src/skills.rs#L93-L115)
-- [README.md: Agent compatibility table:348-368](file://README.md#L348-L368)
+- [src/agent/mod.rs:10-171](file://src/agent/mod.rs#L10-L171)
 
-### Per-Phase Agent Configuration
-AGTX allows assigning different agents to different workflow phases. Configuration is global and project-scoped:
-- Global default agent and per-phase overrides in the global config.
-- Project-level overrides in the project config take precedence over global settings.
-- The agent registry resolves the appropriate AgentOperations per phase.
+### Agent Registry and Multi-Agent Workflow
+- RealAgentRegistry builds a map of available agents and ensures a default fallback exists even if not detected.
+- Per-phase agent selection is resolved via merged configuration, falling back to default_agent when not overridden.
 
-Example configuration patterns:
-- Global config sets default agent and per-phase agents.
-- Project config overrides specific phases.
+```mermaid
+classDiagram
+class AgentOperations {
++generate_text(working_dir, prompt) Result<String>
++co_author_string() &str
++build_interactive_command(prompt) String
++build_resume_command() String
++build_orchestrator_command(mcp_json, agtx_bin) String
+}
+class CodingAgent {
+-agent : Agent
++new(agent : Agent)
++generate_text(...)
++co_author_string()
++build_interactive_command(...)
++build_resume_command()
++build_orchestrator_command(...)
+}
+class AgentRegistry {
+<<trait>>
++get(agent_name : &str) Arc<AgentOperations>
+}
+class RealAgentRegistry {
+-agents : HashMap<String, Arc<AgentOperations>>
+-default_name : String
++new(default_name : &str)
++get(agent_name : &str) Arc<AgentOperations>
+}
+AgentOperations <|.. CodingAgent
+AgentRegistry <|.. RealAgentRegistry
+RealAgentRegistry --> CodingAgent : "stores"
+```
 
-**Section sources**
-- [README.md: Per-phase agent configuration:308-327](file://README.md#L308-L327)
-- [src/agent/operations.rs: Agent registry resolution:153-162](file://src/agent/operations.rs#L153-L162)
-
-### Practical Multi-Agent Workflows
-A common pattern assigns agents to distinct phases:
-- Research: Gemini (research-focused).
-- Planning: Claude (structured planning).
-- Implementation: Cursor (editing and execution).
-- Review: Codex (code review and quality checks).
-
-Workflow steps:
-- Configure per-phase agents in the global or project config.
-- Create tasks; AGTX deploys skills and sends the agent-specific command for each phase.
-- Artifacts signal readiness; AGTX advances the task automatically or via orchestrator.
-
-**Section sources**
-- [README.md: Multi-agent task lifecycle:62-63](file://README.md#L62-L63)
-- [README.md: Per-phase agent configuration:308-327](file://README.md#L308-L327)
-
-### Agent-Specific Considerations
-- Authentication and setup:
-  - Claude: Register MCP server and install plugin; use continue/resume flags.
-  - Codex: Add MCP server and configure marketplace; skills deployed under .codex/skills.
-  - Gemini: Add MCP server and copy skill context.
-  - Cursor: Add MCP server and copy skills to .cursor/skills.
-  - Copilot: No interactive skill invocation; rely on prompts.
-  - OpenCode: Add MCP server and deploy commands to .config/opencode/command.
-- API limits and performance:
-  - Each agent has distinct rate limits and latency characteristics.
-  - Use per-phase configuration to balance load and leverage agent strengths.
-- Session persistence:
-  - tmux windows persist across phases; resume commands reconnect to existing sessions.
+**Diagram sources**
+- [src/agent/operations.rs:17-162](file://src/agent/operations.rs#L17-L162)
 
 **Section sources**
-- [README.md: Agent installation and setup:186-256](file://README.md#L186-L256)
-- [src/agent/mod.rs: Resume and interactive commands:36-76](file://src/agent/mod.rs#L36-L76)
-- [CLAUDE.md: Session persistence and tmux:148-190](file://CLAUDE.md#L148-L190)
+- [src/agent/operations.rs:110-162](file://src/agent/operations.rs#L110-L162)
+- [src/config/mod.rs:390-408](file://src/config/mod.rs#L390-L408)
 
-### Troubleshooting Guide
-Common issues and resolutions:
-- Agent not detected:
-  - Verify the agent binary is installed and on PATH.
-  - Confirm availability via agent status checks.
-- Command execution problems:
-  - Ensure the agent-specific command transformation matches the agent’s expected format.
-  - Check prompt triggers and auto-dismiss rules for interactive prompts.
-- Skill deployment failures:
-  - Confirm agent-native skill directories exist and are writable.
-  - Validate skill filenames and frontmatter for each agent.
-- MCP connectivity:
-  - Re-register the MCP server for the agent.
-  - Use project-scoped mode when the orchestrator is bound to a specific project.
-
-**Section sources**
-- [src/agent/mod.rs: Agent availability and detection:31-34](file://src/agent/mod.rs#L31-L34)
-- [src/skills.rs: Skill deployment and scanning:259-408](file://src/skills.rs#L259-L408)
-- [README.md: MCP server modes and tools:573-602](file://README.md#L573-L602)
-
-### Agent Skill Deployment System
-Skills are deployed to agent-native discovery paths:
-- Claude: .claude/commands/<namespace>/<command>.md
-- Gemini: .gemini/commands/<namespace>/<command>.toml (converted from SKILL.md)
-- Codex: .codex/skills/<skill-dir>/SKILL.md
-- Cursor: .cursor/skills/<skill-dir>/SKILL.md
-- OpenCode: .opencode/command/<command>.md
-- Copilot: .github/agents/<namespace>/<command>.md
-
-AGTX:
-- Scans built-in and plugin skills.
-- Converts SKILL.md content to agent-specific formats (e.g., TOML for Gemini).
-- Writes files to the appropriate agent-native paths in each worktree.
+### Skill Transformation System
+- Canonical commands are in the form /namespace:command args.
+- Transformations per agent:
+  - Claude/Gemini: unchanged
+  - OpenCode: replace first colon with hyphen
+  - Codex: replace first colon with hyphen, prepend dollar sign
+  - Cursor: replace first colon with hyphen (keep slash)
+- Agent-native skill directories and filenames vary by agent; scanning enumerates available skills and descriptions.
 
 ```mermaid
 flowchart TD
-A["Built-in and plugin skills"] --> B["Scan agent-native paths"]
-B --> C{"Agent type"}
-C --> |Claude/Gemini/Copilot| D["Write .md files"]
-C --> |Gemini| E["Convert to .toml"]
-C --> |Codex/Cursor| F["Write SKILL.md in skill dirs"]
-C --> |OpenCode| G["Write .md in flat command dir"]
-D --> H["Worktree ready"]
-E --> H
-F --> H
-G --> H
+InCmd["Canonical command<br/>/namespace:command args"] --> CheckAgent{"Agent type"}
+CheckAgent --> |claude| Keep["Unchanged"]
+CheckAgent --> |gemini| Keep
+CheckAgent --> |opencode| Hyphen["Replace ':' with '-' once"]
+CheckAgent --> |codex| HyphenDol["Replace ':' with '-' once, prepend '$'"]
+CheckAgent --> |cursor| Hyphen
+CheckAgent --> |other| Fallback["None (fallback to file-path)"]
+Hyphen --> OutCmd["Agent-native command"]
+HyphenDol --> OutCmd
+Keep --> OutCmd
+Fallback --> OutCmd
 ```
 
 **Diagram sources**
-- [src/skills.rs: agent_native_skill_dir and helpers:31-81](file://src/skills.rs#L31-L81)
-- [src/skills.rs: scan_agent_skills:259-408](file://src/skills.rs#L259-L408)
+- [src/skills.rs:83-115](file://src/skills.rs#L83-L115)
 
 **Section sources**
-- [src/skills.rs: agent_native_skill_dir and helpers:31-81](file://src/skills.rs#L31-L81)
-- [src/skills.rs: scan_agent_skills:259-408](file://src/skills.rs#L259-L408)
-- [CLAUDE.md: Skill system and canonical paths:131-147](file://CLAUDE.md#L131-L147)
+- [src/skills.rs:31-115](file://src/skills.rs#L31-L115)
+
+### Command Construction Patterns and Agent-Specific Flags
+- Interactive command construction includes agent-specific flags and optional initial prompts.
+- Resume command construction recovers sessions after restarts using agent-specific resume/continue flags.
+
+```mermaid
+sequenceDiagram
+participant Ops as "CodingAgent"
+participant Agent as "Agent"
+participant OS as "Shell"
+Ops->>Agent : build_interactive_command(prompt)
+Agent-->>Ops : "agent --flags 'prompt'"
+Ops->>OS : spawn process
+OS-->>Ops : PID
+Ops->>Agent : build_resume_command()
+Agent-->>Ops : "agent --continue"
+Ops->>OS : spawn process
+```
+
+**Diagram sources**
+- [src/agent/mod.rs:36-77](file://src/agent/mod.rs#L36-L77)
+- [src/agent/operations.rs:55-108](file://src/agent/operations.rs#L55-L108)
+
+**Section sources**
+- [src/agent/mod.rs:36-77](file://src/agent/mod.rs#L36-L77)
+- [src/agent/operations.rs:55-108](file://src/agent/operations.rs#L55-L108)
+
+### Plugin Compatibility and Command Mapping
+- Plugins define supported agents and map canonical commands to agent-native invocation formats.
+- Built-in plugin “agtx” uses canonical commands with namespace “agtx”.
+
+Examples of plugin command mappings:
+- agtx plugin: /agtx:research, /agtx:plan, /agtx:execute, /agtx:review
+- gsd plugin: /gsd:new-project, /gsd:discuss-phase {phase}, /gsd:plan-phase {phase}, /gsd:execute-phase {phase}, /gsd:verify-work {phase}
+- spec-kit plugin: /speckit.specify, /speckit.plan, /speckit.implement, /speckit.analyze
+- openspec plugin: /opsx:propose {task}, /opsx:apply, /opsx:verify
+- superpowers plugin: /superpowers commands (Claude-only)
+- bmad plugin: /bmad:* commands
+- agent-skills plugin: /spec, /plan, /build, /review
+
+Supported agents per plugin:
+- gsd: ["claude", "codex", "gemini", "opencode"]
+- superpowers: ["claude"]
+- agent-skills: depends on agent-specific installation steps
+
+**Section sources**
+- [plugins/agtx/plugin.toml:11-16](file://plugins/agtx/plugin.toml#L11-L16)
+- [plugins/gsd/plugin.toml:15-21](file://plugins/gsd/plugin.toml#L15-L21)
+- [plugins/spec-kit/plugin.toml:14-18](file://plugins/spec-kit/plugin.toml#L14-L18)
+- [plugins/openspec/plugin.toml:11-14](file://plugins/openspec/plugin.toml#L11-L14)
+- [plugins/superpowers/plugin.toml:1-16](file://plugins/superpowers/plugin.toml#L1-16)
+- [plugins/bmad/plugin.toml:10-13](file://plugins/bmad/plugin.toml#L10-L13)
+- [plugins/agent-skills/plugin.toml:14-18](file://plugins/agent-skills/plugin.toml#L14-L18)
+- [plugins/gsd/plugin.toml:4](file://plugins/gsd/plugin.toml#L4)
+- [plugins/superpowers/plugin.toml:3](file://plugins/superpowers/plugin.toml#L3)
+
+### Multi-Agent Workflow Configuration
+- GlobalConfig supports default_agent and per-phase overrides (research, planning, running, review).
+- ProjectConfig mirrors these settings and merges with GlobalConfig to produce MergedConfig.
+- MergedConfig.agent_for_phase resolves the effective agent for a given phase, with explicit overrides taking precedence.
+
+```mermaid
+flowchart TD
+G["GlobalConfig"] --> Merge["MergedConfig.merge(global, project)"]
+P["ProjectConfig"] --> Merge
+Merge --> PhaseSel{"Phase: research/planning/running/review"}
+PhaseSel --> Explicit{"Explicit override?"}
+Explicit --> |Yes| UseOverride["Use phase override"]
+Explicit --> |No| UseDefault["Use default_agent"]
+UseOverride --> Result["Resolved agent name"]
+UseDefault --> Result
+```
+
+**Diagram sources**
+- [src/config/mod.rs:357-408](file://src/config/mod.rs#L357-L408)
+
+**Section sources**
+- [src/config/mod.rs:5-228](file://src/config/mod.rs#L5-L228)
+- [src/config/mod.rs:357-408](file://src/config/mod.rs#L357-L408)
+
+### Agent-Native Skill Discovery and Deployment
+- Agent-native directories differ by agent:
+  - Claude/Copilot: .claude/commands/<namespace>/... or .github/agents/<namespace>/...
+  - Gemini: .gemini/commands/<namespace>.toml
+  - Codex: .codex/skills/<skill>/SKILL.md
+  - Cursor: .cursor/skills/<skill>/SKILL.md
+  - OpenCode: .config/opencode/command/<command>.md
+- Scanning enumerates commands and descriptions from agent-native locations.
+- Skill transformation utilities convert canonical skill names to agent-native filenames and command names.
+
+**Section sources**
+- [src/skills.rs:31-81](file://src/skills.rs#L31-L81)
+- [src/skills.rs:259-408](file://src/skills.rs#L259-L408)
 
 ## Dependency Analysis
-The agent integration relies on:
-- Agent definitions and command builders.
-- Agent registry for per-phase selection.
-- Skill deployment to agent-native paths.
-- Plugin configuration for commands, prompts, and artifacts.
-- MCP server for orchestrator and skills.
+The following diagram shows key dependencies among modules and plugins:
 
 ```mermaid
 graph LR
-Agents["Agent definitions<br/>(src/agent/mod.rs)"] --> Registry["Agent registry<br/>(src/agent/operations.rs)"]
-Registry --> Commands["Transformed commands<br/>(src/skills.rs)"]
-Skills["Skill deployment<br/>(src/skills.rs)"] --> Agents
-Plugins["Plugin configs<br/>(plugins/*/plugin.toml)"] --> Commands
-Plugins --> Skills
-MCP["MCP server<br/>(CLAUDE.md)"] --> Registry
-MCP --> Commands
+AgentMod["src/agent/mod.rs"] --> AgentOps["src/agent/operations.rs"]
+AgentOps --> Skills["src/skills.rs"]
+Config["src/config/mod.rs"] --> AgentOps
+Config --> Skills
+AgtxP["plugins/agtx/plugin.toml"] --> Config
+GSDP["plugins/gsd/plugin.toml"] --> Config
+SpecP["plugins/spec-kit/plugin.toml"] --> Config
+OpenSpecP["plugins/openspec/plugin.toml"] --> Config
+SuperP["plugins/superpowers/plugin.toml"] --> Config
+BMADP["plugins/bmad/plugin.toml"] --> Config
+VoidP["plugins/void/plugin.toml"] --> Config
+AgentSkillsP["plugins/agent-skills/plugin.toml"] --> Config
 ```
 
 **Diagram sources**
-- [src/agent/mod.rs: Known agents:80-122](file://src/agent/mod.rs#L80-L122)
-- [src/agent/operations.rs: Agent registry:119-162](file://src/agent/operations.rs#L119-L162)
-- [src/skills.rs: Transform and deployment:31-115](file://src/skills.rs#L31-L115)
-- [CLAUDE.md: MCP server:50-54](file://CLAUDE.md#L50-L54)
+- [src/agent/mod.rs:1-171](file://src/agent/mod.rs#L1-L171)
+- [src/agent/operations.rs:1-163](file://src/agent/operations.rs#L1-L163)
+- [src/config/mod.rs:1-595](file://src/config/mod.rs#L1-L595)
+- [src/skills.rs:1-409](file://src/skills.rs#L1-L409)
+- [plugins/agtx/plugin.toml:1-16](file://plugins/agtx/plugin.toml#L1-L16)
+- [plugins/gsd/plugin.toml:1-34](file://plugins/gsd/plugin.toml#L1-L34)
+- [plugins/spec-kit/plugin.toml:1-21](file://plugins/spec-kit/plugin.toml#L1-L21)
+- [plugins/openspec/plugin.toml:1-21](file://plugins/openspec/plugin.toml#L1-L21)
+- [plugins/superpowers/plugin.toml:1-16](file://plugins/superpowers/plugin.toml#L1-L16)
+- [plugins/bmad/plugin.toml:1-22](file://plugins/bmad/plugin.toml#L1-L22)
+- [plugins/void/plugin.toml:1-4](file://plugins/void/plugin.toml#L1-L4)
+- [plugins/agent-skills/plugin.toml:1-19](file://plugins/agent-skills/plugin.toml#L1-L19)
 
 **Section sources**
-- [src/agent/mod.rs: Known agents:80-122](file://src/agent/mod.rs#L80-L122)
-- [src/agent/operations.rs: Agent registry:119-162](file://src/agent/operations.rs#L119-L162)
-- [src/skills.rs: Transform and deployment:31-115](file://src/skills.rs#L31-L115)
-- [CLAUDE.md: MCP server:50-54](file://CLAUDE.md#L50-L54)
+- [src/agent/mod.rs:1-171](file://src/agent/mod.rs#L1-L171)
+- [src/agent/operations.rs:1-163](file://src/agent/operations.rs#L1-L163)
+- [src/config/mod.rs:1-595](file://src/config/mod.rs#L1-L595)
+- [src/skills.rs:1-409](file://src/skills.rs#L1-L409)
 
 ## Performance Considerations
-- Parallelism: Each task runs in its own tmux window and git worktree, enabling multiple agents to operate concurrently.
-- Artifact-driven gating: Phase advancement is artifact-based, reducing unnecessary retries.
-- Prompt triggers and auto-dismiss: Reduce idle time by waiting for interactive prompts and dismissing them automatically.
-- Orchestrator mode: Reduces manual intervention by advancing tasks when artifacts are ready.
-
-[No sources needed since this section provides general guidance]
+- Prefer detecting agents once at startup and caching availability to avoid repeated PATH checks.
+- Use per-phase agent selection judiciously; avoid frequent switching between agents to minimize session overhead.
+- For plugins with prompt triggers, tune polling intervals to reduce unnecessary tmux pane queries.
+- When using orchestrator mode, ensure MCP registration cleanup does not block interactive sessions.
 
 ## Troubleshooting Guide
-- Connectivity:
-  - Re-add MCP server registrations for agents.
-  - Verify project-scoped vs global MCP modes.
-- Command execution:
-  - Confirm canonical-to-agent transformation is correct.
-  - Check prompt triggers and auto-dismiss rules.
-- Skills:
-  - Ensure agent-native directories exist and are writable.
-  - Validate skill filenames and frontmatter.
-- Session recovery:
-  - Use resume commands to reconnect to existing tmux sessions.
+Common issues and resolutions:
+
+- Agent not detected
+  - Ensure the agent’s CLI is installed and on PATH. The detection logic checks command availability.
+  - Verify the agent’s interactive and resume commands are supported on your platform.
+
+- Skill deployment fails
+  - Confirm agent-native directories exist and are writable.
+  - For Gemini, ensure TOML command files are properly formatted with description and prompt fields.
+  - For Codex/Cursor, ensure SKILL.md exists in the expected skill directory.
+
+- Session management failures
+  - Use the resume command builder to recover sessions after restarts.
+  - For Claude orchestrator mode, ensure MCP registration is cleaned up before re-registration.
+
+- Plugin compatibility errors
+  - Check plugin.supported_agents for allowed agents.
+  - If a plugin requires initialization scripts, ensure they are executed before invoking plugin commands.
+
+- Command transformation mismatches
+  - Verify canonical commands match the agent’s expected invocation format.
+  - For OpenCode/Cursor, confirm the first colon is replaced with a hyphen; for Codex, also prepend a dollar sign.
 
 **Section sources**
-- [README.md: MCP server modes and tools:573-602](file://README.md#L573-L602)
-- [src/skills.rs: scan_agent_skills:259-408](file://src/skills.rs#L259-L408)
-- [src/agent/mod.rs: Resume and interactive commands:36-76](file://src/agent/mod.rs#L36-L76)
+- [src/agent/mod.rs:32-48](file://src/agent/mod.rs#L32-L48)
+- [src/agent/operations.rs:92-107](file://src/agent/operations.rs#L92-L107)
+- [src/skills.rs:128-139](file://src/skills.rs#L128-L139)
+- [plugins/gsd/plugin.toml:4](file://plugins/gsd/plugin.toml#L4)
+- [plugins/superpowers/plugin.toml:3](file://plugins/superpowers/plugin.toml#L3)
 
 ## Conclusion
-AGTX provides a robust framework for coordinating multiple AI coding agents in parallel. Its per-phase agent configuration, canonical-to-agent command transformation, and agent-native skill deployment enable flexible, scalable workflows. With MCP support and artifact-driven gating, AGTX streamlines multi-agent collaboration across research, planning, implementation, and review.
+Agtx provides a robust foundation for multi-agent AI coding workflows by:
+- Detecting and configuring agents with platform-specific command flags
+- Resolving per-phase agents via global and project configuration
+- Transforming canonical commands into agent-native invocation formats
+- Supporting plugin-defined commands, prompts, and artifacts with explicit compatibility declarations
 
-[No sources needed since this section summarizes without analyzing specific files]
+Adopting the best practices and troubleshooting guidance in this document will help you achieve reliable, efficient, and portable agent integrations across Claude Code, Codex, Gemini CLI, OpenCode, Cursor, and Copilot.
 
 ## Appendices
 
-### Agent Compatibility Matrix
-- Claude, Gemini, Codex, OpenCode, Cursor support interactive skills and commands.
-- Copilot supports prompts but not interactive skill invocation.
-- Agent-specific command formats are applied automatically.
+### Compatibility Matrix
+- gsd plugin: compatible with Claude, Codex, Gemini, OpenCode
+- superpowers plugin: compatible with Claude
+- agent-skills plugin: depends on agent-specific installation steps
+- spec-kit, openspec, bmad, void: no explicit supported_agents; consult plugin documentation for agent-specific notes
 
 **Section sources**
-- [README.md: Agent compatibility table:348-368](file://README.md#L348-L368)
-
-### Example Plugin Configurations
-- agtx: Built-in workflow with skills and prompts.
-- agent-skills: Production-grade skills with agent-specific setup.
-- gsd: Structured spec-driven development with preresearch and cyclic phases.
-- openspec: Lightweight specification framework with copy-back artifacts.
-- bmad: AI-driven agile development with planning and implementation artifacts.
-- superpowers: Brainstorming, plans, TDD, and subagent-driven development.
-
-**Section sources**
-- [plugins/agtx/plugin.toml:1-16](file://plugins/agtx/plugin.toml#L1-L16)
+- [plugins/gsd/plugin.toml:4](file://plugins/gsd/plugin.toml#L4)
+- [plugins/superpowers/plugin.toml:3](file://plugins/superpowers/plugin.toml#L3)
 - [plugins/agent-skills/plugin.toml:1-19](file://plugins/agent-skills/plugin.toml#L1-L19)
-- [plugins/gsd/plugin.toml:1-34](file://plugins/gsd/plugin.toml#L1-L34)
+- [plugins/spec-kit/plugin.toml:1-21](file://plugins/spec-kit/plugin.toml#L1-L21)
 - [plugins/openspec/plugin.toml:1-21](file://plugins/openspec/plugin.toml#L1-L21)
 - [plugins/bmad/plugin.toml:1-22](file://plugins/bmad/plugin.toml#L1-L22)
-- [plugins/superpowers/plugin.toml:1-16](file://plugins/superpowers/plugin.toml#L1-L16)
+- [plugins/void/plugin.toml:1-4](file://plugins/void/plugin.toml#L1-L4)

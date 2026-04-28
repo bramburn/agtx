@@ -198,6 +198,55 @@ fn hex_to_color(hex: &str) -> Color {
         }
     }
 
+    /// Build the interactive footer items for the shell popup.
+    /// Returns Vec<FooterItem> where each item maps a visible label to its Ctrl+key trigger.
+    fn build_shell_popup_footer_items() -> Vec<FooterItem> {
+        vec![
+            FooterItem {
+                label: " [C-j] scroll down ".to_string(),
+                trigger: make_ctrl(KeyCode::Char('j')),
+                x: 0,
+                width: 18,
+            },
+            FooterItem {
+                label: " [C-k] scroll up ".to_string(),
+                trigger: make_ctrl(KeyCode::Char('k')),
+                x: 0,
+                width: 17,
+            },
+            FooterItem {
+                label: " [C-d] page down ".to_string(),
+                trigger: make_ctrl(KeyCode::Char('d')),
+                x: 0,
+                width: 17,
+            },
+            FooterItem {
+                label: " [C-u] page up ".to_string(),
+                trigger: make_ctrl(KeyCode::Char('u')),
+                x: 0,
+                width: 15,
+            },
+            FooterItem {
+                label: " [C-g] bottom ".to_string(),
+                trigger: make_ctrl(KeyCode::Char('g')),
+                x: 0,
+                width: 15,
+            },
+            FooterItem {
+                label: " [C-f] fullscreen ".to_string(),
+                trigger: make_ctrl(KeyCode::Char('f')),
+                x: 0,
+                width: 16,
+            },
+            FooterItem {
+                label: " [C-q] close ".to_string(),
+                trigger: make_ctrl(KeyCode::Char('q')),
+                x: 0,
+                width: 13,
+            },
+        ]
+    }
+
     /// Build the interactive footer paragraph widget and register click regions.
     /// Returns the click regions for mouse hit-testing.
     fn build_and_render_footer(
@@ -422,15 +471,15 @@ const SHELL_POPUP_HEIGHT_PERCENT: u16 = 75; // Percentage of terminal height
 /// Rebuilt every draw frame; x/width are absolute terminal columns (set at render time).
 /// Mouse clicks and F2-keyboard navigation both dispatch through FooterItem triggers.
 #[derive(Debug, Clone)]
-struct FooterItem {
+pub struct FooterItem {
     /// Display label, e.g. " [o] new " — rendered as clickable text in the footer
-    label: String,
+    pub label: String,
     /// KeyEvent fired when this item is activated via click or F2 nav + Enter
-    trigger: event::KeyEvent,
+    pub trigger: event::KeyEvent,
     /// Absolute terminal column where this item starts (set during render)
-    x: u16,
+    pub x: u16,
     /// Character width of the label (for hit-testing)
-    width: u16,
+    pub width: u16,
 }
 
 /// A rectangular clickable region on screen — rebuilt every frame during draw_board().
@@ -1849,7 +1898,15 @@ impl App {
 
         // Shell popup overlay
         if let Some(popup) = &state.shell_popup {
-            Self::draw_shell_popup(popup, frame, area, &state.config.theme);
+            Self::draw_shell_popup(
+                popup,
+                frame,
+                area,
+                &state.config.theme,
+                &state.footer_items,
+                state.footer_nav_active,
+                state.footer_nav_index,
+            );
         }
 
         // Task search popup
@@ -2373,7 +2430,15 @@ impl App {
         (Vec::new(), Vec::new())
     }
 
-    fn draw_shell_popup(popup: &ShellPopup, frame: &mut Frame, area: Rect, theme: &ThemeConfig) {
+    fn draw_shell_popup(
+        popup: &ShellPopup,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &ThemeConfig,
+        footer_items: &[FooterItem],
+        footer_nav_active: bool,
+        footer_nav_index: usize,
+    ) {
         let popup_area =
             centered_rect_fixed_width(SHELL_POPUP_WIDTH, SHELL_POPUP_HEIGHT_PERCENT, area);
 
@@ -2391,7 +2456,16 @@ impl App {
             escalation_bg: Color::Yellow,
         };
 
-        shell_popup::render_shell_popup(popup, frame, popup_area, styled_lines, &colors);
+        shell_popup::render_shell_popup(
+            popup,
+            frame,
+            popup_area,
+            styled_lines,
+            &colors,
+            footer_items,
+            footer_nav_active,
+            footer_nav_index,
+        );
     }
 
     fn draw_task_card(
@@ -2727,10 +2801,9 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
-        // F2 = toggle footer keyboard navigation mode (only in Normal mode with no popups open)
+        // F2 = toggle footer keyboard navigation mode (only in Normal mode with no popups open other than shell popup)
         if key.code == KeyCode::F(2) {
-            let no_popup = self.state.shell_popup.is_none()
-                && self.state.pr_confirm_popup.is_none()
+            let no_popup = self.state.pr_confirm_popup.is_none()
                 && self.state.diff_popup.is_none()
                 && self.state.task_search.is_none()
                 && self.state.plugin_select_popup.is_none()
@@ -2742,12 +2815,16 @@ impl App {
                 self.state.footer_nav_active = !self.state.footer_nav_active;
                 if self.state.footer_nav_active {
                     self.state.footer_nav_index = 0;
+                    // Build shell popup footer items if shell popup is open, otherwise board footer items
+                    if self.state.shell_popup.is_some() {
+                        self.state.footer_items = build_shell_popup_footer_items();
+                    }
                 }
             }
             return Ok(());
         }
 
-        // Footer nav: Left/Right/Enter/Esc to navigate and activate items
+        // Footer nav: Left/Right/Enter/Esc to navigate and activate items (always active, even with shell popup)
         if self.state.footer_nav_active {
             match key.code {
                 KeyCode::Left | KeyCode::Char('h') => {
@@ -3400,25 +3477,77 @@ impl App {
             let window_name = popup.window_name.clone();
             let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-            // Dismiss escalation note on any key press (before forwarding)
+            // Dismiss escalation note on any key press (before forwarding), but not for footer nav keys
             if popup.escalation_note.is_some() {
-                let task_id = popup.task_id.clone();
-                popup.escalation_note = None;
-                if let Some(id) = task_id {
-                    if let Some(db) = &self.state.db {
-                        if let Ok(Some(mut task)) = db.get_task(&id) {
-                            task.escalation_note = None;
-                            task.updated_at = chrono::Utc::now();
-                            let _ = db.update_task(&task);
+                let is_footer_nav_key = matches!(key.code, KeyCode::F(2) | KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Esc);
+                if !is_footer_nav_key {
+                    let task_id = popup.task_id.clone();
+                    popup.escalation_note = None;
+                    if let Some(id) = task_id {
+                        if let Some(db) = &self.state.db {
+                            if let Ok(Some(mut task)) = db.get_task(&id) {
+                                task.escalation_note = None;
+                                task.updated_at = chrono::Utc::now();
+                                let _ = db.update_task(&task);
+                            }
+                        }
+                        // Update the in-memory task list too
+                        if let Some(t) = self.state.board.tasks.iter_mut().find(|t| t.id == id) {
+                            t.escalation_note = None;
                         }
                     }
-                    // Update the in-memory task list too
-                    if let Some(t) = self.state.board.tasks.iter_mut().find(|t| t.id == id) {
-                        t.escalation_note = None;
+                    // Return early so the keypress only dismisses the banner, not forwarded
+                    return Ok(());
+                }
+            }
+
+            // F2: toggle footer navigation
+            if key.code == KeyCode::F(2) {
+                self.state.footer_nav_active = !self.state.footer_nav_active;
+                if self.state.footer_nav_active {
+                    self.state.footer_nav_index = 0;
+                    self.state.footer_items = build_shell_popup_footer_items();
+                }
+                return Ok(());
+            }
+
+            // Footer navigation active: intercept Left/Right/Enter/Esc
+            if self.state.footer_nav_active {
+                match key.code {
+                    KeyCode::Left | KeyCode::Char('h') => {
+                        self.state.footer_nav_index = self.state.footer_nav_index.saturating_sub(1);
+                        return Ok(());
+                    }
+                    KeyCode::Right | KeyCode::Char('l') => {
+                        let max = self.state.footer_items.len().saturating_sub(1);
+                        if self.state.footer_nav_index < max {
+                            self.state.footer_nav_index += 1;
+                        }
+                        return Ok(());
+                    }
+                    KeyCode::Enter => {
+                        self.state.footer_nav_active = false;
+                        if let Some(item) = self.state.footer_items.get(self.state.footer_nav_index).cloned() {
+                            // Re-enter handle_shell_popup_key with the trigger key
+                            return self.handle_shell_popup_key(item.trigger);
+                        }
+                        return Ok(());
+                    }
+                    KeyCode::Esc => {
+                        self.state.footer_nav_active = false;
+                        return Ok(());
+                    }
+                    _ => {
+                        // All other keys: forward to tmux as usual
+                        send_key_to_tmux(&window_name, key, self.state.tmux_ops.as_ref());
+                        popup.cached_content = capture_tmux_pane_with_history(
+                            &window_name,
+                            500,
+                            self.state.tmux_ops.as_ref(),
+                        );
+                        return Ok(());
                     }
                 }
-                // Return early so the keypress only dismisses the banner, not forwarded
-                return Ok(());
             }
 
             match key.code {

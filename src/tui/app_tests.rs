@@ -9962,10 +9962,10 @@ fn test_f2_toggles_footer_nav_active() {
     assert!(!app.state.footer_nav_active);
 }
 
-/// F2 does NOT activate footer nav when a popup is open (e.g., shell popup).
+/// F2 activates footer nav when shell popup is open (shell popup handles its own nav).
 #[test]
 #[cfg(feature = "test-mocks")]
-fn test_f2_ignored_when_shell_popup_open() {
+fn test_f2_toggles_footer_nav_when_shell_popup_open() {
     let mut app = make_test_app();
     app.state.shell_popup = Some(ShellPopup::new(
         "task".to_string(),
@@ -9974,7 +9974,13 @@ fn test_f2_ignored_when_shell_popup_open() {
     assert!(!app.state.footer_nav_active);
 
     press_key(&mut app, KeyCode::F(2));
-    // Footer nav stays inactive — guard condition prevents activation
+    // Footer nav is now active — F2 works even with shell popup open
+    assert!(app.state.footer_nav_active);
+    // Footer items should be populated with shell popup items
+    assert!(!app.state.footer_items.is_empty());
+
+    // F2 again — footer nav deactivates
+    press_key(&mut app, KeyCode::F(2));
     assert!(!app.state.footer_nav_active);
 }
 
