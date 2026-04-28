@@ -1,6 +1,9 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEventKind, KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -34,6 +37,211 @@ fn hex_to_color(hex: &str) -> Color {
         .map(|(r, g, b)| Color::Rgb(r, g, b))
         .unwrap_or(Color::White)
 }
+
+
+    // -------------------------------------------------------------------------
+    // Footer item helpers — map display labels to KeyEvents for mouse + F2 nav
+    // -------------------------------------------------------------------------
+
+    /// Construct a KeyEvent with no modifiers (e.g., for letter shortcuts like o, d)
+    fn make_key(code: KeyCode) -> event::KeyEvent {
+        event::KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    /// Construct a KeyEvent with CONTROL modifier (e.g., Ctrl+f for fullscreen)
+    fn make_ctrl(code: KeyCode) -> event::KeyEvent {
+        event::KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    /// Build the interactive footer items for the current input mode and board state.
+    /// Returns Vec<FooterItem> where each item maps a label to its trigger KeyEvent.
+    /// Mouse clicks and F2-keyboard navigation both activate items through their triggers.
+    fn build_footer_items(
+        input_mode: InputMode,
+        sidebar_focused: bool,
+        selected_column: usize,
+        has_cyclic_plugin: bool,
+        fullscreen_on_enter: bool,
+    ) -> Vec<FooterItem> {
+        match input_mode {
+            InputMode::Normal => {
+                if sidebar_focused {
+                    vec![
+                        FooterItem { label: " [j] up ".to_string(), trigger: make_key(KeyCode::Char('j')), x: 0, width: 8 },
+                        FooterItem { label: " [k] down ".to_string(), trigger: make_key(KeyCode::Char('k')), x: 0, width: 9 },
+                        FooterItem { label: " [Enter] open ".to_string(), trigger: make_key(KeyCode::Enter), x: 0, width: 12 },
+                        FooterItem { label: " [l] board ".to_string(), trigger: make_key(KeyCode::Char('l')), x: 0, width: 11 },
+                        FooterItem { label: " [e] hide sidebar ".to_string(), trigger: make_key(KeyCode::Char('e')), x: 0, width: 17 },
+                        FooterItem { label: " [q] quit ".to_string(), trigger: make_key(KeyCode::Char('q')), x: 0, width: 10 },
+                    ]
+                } else {
+                    match selected_column {
+                        0 => vec![
+                            FooterItem { label: " [o] new ".to_string(), trigger: make_key(KeyCode::Char('o')), x: 0, width: 8 },
+                            FooterItem { label: " [/] search ".to_string(), trigger: make_key(KeyCode::Char('/')), x: 0, width: 11 },
+                            FooterItem { label: " [Enter] open ".to_string(), trigger: make_key(KeyCode::Enter), x: 0, width: 12 },
+                            FooterItem { label: " [x] del ".to_string(), trigger: make_key(KeyCode::Char('x')), x: 0, width: 9 },
+                            FooterItem { label: " [d] diff ".to_string(), trigger: make_key(KeyCode::Char('d')), x: 0, width: 9 },
+                            FooterItem { label: " [R] research ".to_string(), trigger: make_key(KeyCode::Char('R')), x: 0, width: 12 },
+                            FooterItem { label: " [m] plan ".to_string(), trigger: make_key(KeyCode::Char('m')), x: 0, width: 10 },
+                            FooterItem { label: " [M] run ".to_string(), trigger: make_key(KeyCode::Char('M')), x: 0, width: 9 },
+                            FooterItem { label: " [e] sidebar ".to_string(), trigger: make_key(KeyCode::Char('e')), x: 0, width: 12 },
+                            FooterItem { label: " [q] quit ".to_string(), trigger: make_key(KeyCode::Char('q')), x: 0, width: 9 },
+                        ],
+                        1 => {
+                            let mut items = vec![
+                                FooterItem { label: " [o] new ".to_string(), trigger: make_key(KeyCode::Char('o')), x: 0, width: 8 },
+                                FooterItem { label: " [/] search ".to_string(), trigger: make_key(KeyCode::Char('/')), x: 0, width: 11 },
+                                FooterItem { label: " [Enter] open ".to_string(), trigger: make_key(KeyCode::Enter), x: 0, width: 12 },
+                                FooterItem { label: " [x] del ".to_string(), trigger: make_key(KeyCode::Char('x')), x: 0, width: 9 },
+                                FooterItem { label: " [d] diff ".to_string(), trigger: make_key(KeyCode::Char('d')), x: 0, width: 9 },
+                            ];
+                            if fullscreen_on_enter {
+                                items.push(FooterItem { label: " [m] run ".to_string(), trigger: make_key(KeyCode::Char('m')), x: 0, width: 10 });
+                            } else {
+                                items.push(FooterItem { label: " [C-f] fullscreen ".to_string(), trigger: make_ctrl(KeyCode::Char('f')), x: 0, width: 16 });
+                                items.push(FooterItem { label: " [m] run ".to_string(), trigger: make_key(KeyCode::Char('m')), x: 0, width: 10 });
+                            }
+                            items.push(FooterItem { label: " [e] sidebar ".to_string(), trigger: make_key(KeyCode::Char('e')), x: 0, width: 12 });
+                            items.push(FooterItem { label: " [q] quit ".to_string(), trigger: make_key(KeyCode::Char('q')), x: 0, width: 9 });
+                            items
+                        }
+                        2 => {
+                            let mut items = vec![
+                                FooterItem { label: " [o] new ".to_string(), trigger: make_key(KeyCode::Char('o')), x: 0, width: 8 },
+                                FooterItem { label: " [/] search ".to_string(), trigger: make_key(KeyCode::Char('/')), x: 0, width: 11 },
+                                FooterItem { label: " [Enter] open ".to_string(), trigger: make_key(KeyCode::Enter), x: 0, width: 12 },
+                                FooterItem { label: " [x] del ".to_string(), trigger: make_key(KeyCode::Char('x')), x: 0, width: 9 },
+                                FooterItem { label: " [d] diff ".to_string(), trigger: make_key(KeyCode::Char('d')), x: 0, width: 9 },
+                            ];
+                            if fullscreen_on_enter {
+                                items.push(FooterItem { label: " [m] move ".to_string(), trigger: make_key(KeyCode::Char('m')), x: 0, width: 10 });
+                                items.push(FooterItem { label: " [r] move left ".to_string(), trigger: make_key(KeyCode::Char('r')), x: 0, width: 14 });
+                            } else {
+                                items.push(FooterItem { label: " [C-f] fullscreen ".to_string(), trigger: make_ctrl(KeyCode::Char('f')), x: 0, width: 16 });
+                                items.push(FooterItem { label: " [m] move ".to_string(), trigger: make_key(KeyCode::Char('m')), x: 0, width: 10 });
+                                items.push(FooterItem { label: " [r] move left ".to_string(), trigger: make_key(KeyCode::Char('r')), x: 0, width: 14 });
+                            }
+                            items.push(FooterItem { label: " [e] sidebar ".to_string(), trigger: make_key(KeyCode::Char('e')), x: 0, width: 12 });
+                            items.push(FooterItem { label: " [q] quit ".to_string(), trigger: make_key(KeyCode::Char('q')), x: 0, width: 9 });
+                            items
+                        }
+                        3 if has_cyclic_plugin => {
+                            let mut items = vec![
+                                FooterItem { label: " [o] new ".to_string(), trigger: make_key(KeyCode::Char('o')), x: 0, width: 8 },
+                                FooterItem { label: " [/] search ".to_string(), trigger: make_key(KeyCode::Char('/')), x: 0, width: 11 },
+                                FooterItem { label: " [Enter] open ".to_string(), trigger: make_key(KeyCode::Enter), x: 0, width: 12 },
+                                FooterItem { label: " [x] del ".to_string(), trigger: make_key(KeyCode::Char('x')), x: 0, width: 9 },
+                                FooterItem { label: " [d] diff ".to_string(), trigger: make_key(KeyCode::Char('d')), x: 0, width: 9 },
+                            ];
+                            if fullscreen_on_enter {
+                                items.push(FooterItem { label: " [m] done ".to_string(), trigger: make_key(KeyCode::Char('m')), x: 0, width: 10 });
+                            } else {
+                                items.push(FooterItem { label: " [C-f] fullscreen ".to_string(), trigger: make_ctrl(KeyCode::Char('f')), x: 0, width: 16 });
+                                items.push(FooterItem { label: " [m] done ".to_string(), trigger: make_key(KeyCode::Char('m')), x: 0, width: 10 });
+                            }
+                            items.push(FooterItem { label: " [r] resume ".to_string(), trigger: make_key(KeyCode::Char('r')), x: 0, width: 11 });
+                            items.push(FooterItem { label: " [p] next phase ".to_string(), trigger: make_key(KeyCode::Char('p')), x: 0, width: 14 });
+                            items.push(FooterItem { label: " [e] sidebar ".to_string(), trigger: make_key(KeyCode::Char('e')), x: 0, width: 12 });
+                            items.push(FooterItem { label: " [q] quit ".to_string(), trigger: make_key(KeyCode::Char('q')), x: 0, width: 9 });
+                            items
+                        }
+                        3 => {
+                            let mut items = vec![
+                                FooterItem { label: " [o] new ".to_string(), trigger: make_key(KeyCode::Char('o')), x: 0, width: 8 },
+                                FooterItem { label: " [/] search ".to_string(), trigger: make_key(KeyCode::Char('/')), x: 0, width: 11 },
+                                FooterItem { label: " [Enter] open ".to_string(), trigger: make_key(KeyCode::Enter), x: 0, width: 12 },
+                                FooterItem { label: " [x] del ".to_string(), trigger: make_key(KeyCode::Char('x')), x: 0, width: 9 },
+                                FooterItem { label: " [d] diff ".to_string(), trigger: make_key(KeyCode::Char('d')), x: 0, width: 9 },
+                            ];
+                            if fullscreen_on_enter {
+                                items.push(FooterItem { label: " [m] move ".to_string(), trigger: make_key(KeyCode::Char('m')), x: 0, width: 10 });
+                                items.push(FooterItem { label: " [r] move left ".to_string(), trigger: make_key(KeyCode::Char('r')), x: 0, width: 14 });
+                            } else {
+                                items.push(FooterItem { label: " [C-f] fullscreen ".to_string(), trigger: make_ctrl(KeyCode::Char('f')), x: 0, width: 16 });
+                                items.push(FooterItem { label: " [m] move ".to_string(), trigger: make_key(KeyCode::Char('m')), x: 0, width: 10 });
+                                items.push(FooterItem { label: " [r] move left ".to_string(), trigger: make_key(KeyCode::Char('r')), x: 0, width: 14 });
+                            }
+                            items.push(FooterItem { label: " [e] sidebar ".to_string(), trigger: make_key(KeyCode::Char('e')), x: 0, width: 12 });
+                            items.push(FooterItem { label: " [q] quit ".to_string(), trigger: make_key(KeyCode::Char('q')), x: 0, width: 9 });
+                            items
+                        }
+                        _ => vec![
+                            FooterItem { label: " [o] new ".to_string(), trigger: make_key(KeyCode::Char('o')), x: 0, width: 8 },
+                            FooterItem { label: " [/] search ".to_string(), trigger: make_key(KeyCode::Char('/')), x: 0, width: 11 },
+                            FooterItem { label: " [Enter] open ".to_string(), trigger: make_key(KeyCode::Enter), x: 0, width: 12 },
+                            FooterItem { label: " [x] del ".to_string(), trigger: make_key(KeyCode::Char('x')), x: 0, width: 9 },
+                            FooterItem { label: " [e] sidebar ".to_string(), trigger: make_key(KeyCode::Char('e')), x: 0, width: 12 },
+                            FooterItem { label: " [q] quit ".to_string(), trigger: make_key(KeyCode::Char('q')), x: 0, width: 9 },
+                        ],
+                    }
+                }
+            }
+            InputMode::InputTitle => vec![
+                FooterItem { label: " [Esc] cancel ".to_string(), trigger: make_key(KeyCode::Esc), x: 0, width: 13 },
+                FooterItem { label: " [Enter] next ".to_string(), trigger: make_key(KeyCode::Enter), x: 0, width: 13 },
+            ],
+            InputMode::SelectPlugin => vec![
+                FooterItem { label: " [j] up ".to_string(), trigger: make_key(KeyCode::Char('j')), x: 0, width: 8 },
+                FooterItem { label: " [k] down ".to_string(), trigger: make_key(KeyCode::Char('k')), x: 0, width: 9 },
+                FooterItem { label: " [Tab] cycle ".to_string(), trigger: make_key(KeyCode::Tab), x: 0, width: 12 },
+                FooterItem { label: " [Enter] next ".to_string(), trigger: make_key(KeyCode::Enter), x: 0, width: 12 },
+                FooterItem { label: " [Esc] cancel ".to_string(), trigger: make_key(KeyCode::Esc), x: 0, width: 13 },
+            ],
+            InputMode::InputDescription => vec![
+                FooterItem { label: " [#] files ".to_string(), trigger: make_key(KeyCode::Char('#')), x: 0, width: 11 },
+                FooterItem { label: " [/] skills ".to_string(), trigger: make_key(KeyCode::Char('/')), x: 0, width: 11 },
+                FooterItem { label: " [!] tasks ".to_string(), trigger: make_key(KeyCode::Char('!')), x: 0, width: 11 },
+                FooterItem { label: " [Esc] cancel ".to_string(), trigger: make_key(KeyCode::Esc), x: 0, width: 13 },
+                FooterItem { label: " [Enter] save ".to_string(), trigger: make_key(KeyCode::Enter), x: 0, width: 12 },
+            ],
+        }
+    }
+
+    /// Build the interactive footer paragraph widget and register click regions.
+    /// Returns the click regions for mouse hit-testing.
+    fn build_and_render_footer(
+        items: &[FooterItem],
+        nav_active: bool,
+        nav_index: usize,
+        area: Rect,
+        frame: &mut Frame,
+        style: Style,
+    ) -> Vec<ClickRegion> {
+        let mut regions = Vec::new();
+        let mut spans_vec: Vec<Span> = Vec::new();
+        let mut current_x = area.x;
+
+        for (i, item) in items.iter().enumerate() {
+            let bg = if nav_active && i == nav_index {
+                // Highlight the currently selected footer item with accent background
+                Style::default().bg(hex_to_color("#ead49a"))
+            } else {
+                Style::default()
+            };
+
+            spans_vec.push(Span::styled(item.label.clone(), style.patch(bg)));
+            spans_vec.push(Span::raw(" ")); // spacer between items
+
+            // Record the absolute terminal position for this item (for mouse hit-testing)
+            let width = item.label.len() as u16;
+            regions.push(ClickRegion {
+                area: Rect::new(current_x, area.y, width, area.height),
+                trigger: item.trigger.clone(),
+            });
+
+            current_x += width + 1; // +1 for spacer
+        }
+
+        // Text is built from Lines, not directly from Spans
+        let line = Line::from(spans_vec);
+        let paragraph = Paragraph::new(Text::from(vec![line]))
+            .style(style)
+            .block(Block::default().borders(Borders::ALL));
+
+        frame.render_widget(paragraph, area);
+        regions
+    }
 
 /// Build footer help text based on current UI state
 fn build_footer_text(
@@ -210,6 +418,32 @@ const SHELL_POPUP_WIDTH: u16 = 128; // Total width including borders
 const SHELL_POPUP_CONTENT_WIDTH: u16 = 126; // Content width (SHELL_POPUP_WIDTH - 2 for borders)
 const SHELL_POPUP_HEIGHT_PERCENT: u16 = 75; // Percentage of terminal height
 
+/// One item in the interactive footer — maps a display label to a simulated KeyEvent.
+/// Rebuilt every draw frame; x/width are absolute terminal columns (set at render time).
+/// Mouse clicks and F2-keyboard navigation both dispatch through FooterItem triggers.
+#[derive(Debug, Clone)]
+struct FooterItem {
+    /// Display label, e.g. " [o] new " — rendered as clickable text in the footer
+    label: String,
+    /// KeyEvent fired when this item is activated via click or F2 nav + Enter
+    trigger: event::KeyEvent,
+    /// Absolute terminal column where this item starts (set during render)
+    x: u16,
+    /// Character width of the label (for hit-testing)
+    width: u16,
+}
+
+/// A rectangular clickable region on screen — rebuilt every frame during draw_board().
+/// Click regions are registered for footer items and popup footers; mouse events hit-test
+/// against all active regions and dispatch the region's trigger KeyEvent to handle_key().
+#[derive(Debug, Clone)]
+struct ClickRegion {
+    /// The rectangular area in terminal coordinates (x, y, width, height)
+    area: Rect,
+    /// KeyEvent dispatched when a mouse click falls within this region
+    trigger: event::KeyEvent,
+}
+
 /// Application state (separate from terminal for borrow checker)
 struct AppState {
     mode: AppMode,
@@ -298,6 +532,14 @@ struct AppState {
     cached_plugin: Option<Option<WorkflowPlugin>>,
     // Transient warning message shown in footer (auto-clears after a few seconds)
     warning_message: Option<(String, Instant)>,
+    // Clickable regions registered during the last draw frame (for mouse hit-testing)
+    click_regions: Vec<ClickRegion>,
+    // True when F2 footer navigation mode is active (arrow keys navigate items)
+    footer_nav_active: bool,
+    // Currently highlighted footer item index (0-based, used during F2 nav)
+    footer_nav_index: usize,
+    // Footer items rebuilt each frame (labels + their trigger KeyEvents)
+    footer_items: Vec<FooterItem>,
     // Plugin selection popup
     plugin_select_popup: Option<PluginSelectPopup>,
     // Orchestrator agent tmux target (e.g. "project:orchestrator")
@@ -313,6 +555,7 @@ struct AppState {
     session_refresh_rx: Option<mpsc::Receiver<SessionRefreshResult>>,
     // Cache of dependency satisfaction per task ID (refreshed with tasks)
     deps_satisfied_cache: HashMap<String, bool>,
+    // Unique identifier for this app instance (used for orchestrator notifications)
     instance_id: String,
 }
 
@@ -523,10 +766,19 @@ impl App {
         git_provider_ops: Arc<dyn GitProviderOperations>,
         agent_registry: Arc<dyn agent::AgentRegistry>,
     ) -> Result<Self> {
+        // Panic hook: if we panic after raw mode is enabled, make sure the terminal
+        // is cleaned up (disable mouse capture and raw mode) so the shell is usable.
+        // The Drop impl handles normal exit; the panic hook covers abnormal exits.
+        std::panic::set_hook(Box::new(|_| {
+            let _ = execute!(io::stdout(), DisableMouseCapture);
+            disable_raw_mode().ok();
+        }));
+
         // Setup terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+        // Enable mouse tracking so clicks on footer items are detected
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = ratatui::Terminal::new(AppBackend::Crossterm(backend))?;
 
@@ -636,6 +888,10 @@ impl App {
                 session_refresh_rx: None,
                 deps_satisfied_cache: HashMap::new(),
                 instance_id: uuid::Uuid::new_v4().to_string(),
+                click_regions: Vec::new(),
+                footer_nav_active: false,
+                footer_nav_index: 0,
+                footer_items: Vec::new(),
             },
         };
 
@@ -811,6 +1067,10 @@ impl App {
                 session_refresh_rx: None,
                 deps_satisfied_cache: HashMap::new(),
                 instance_id: uuid::Uuid::new_v4().to_string(),
+                click_regions: Vec::new(),
+                footer_nav_active: false,
+                footer_nav_index: 0,
+                footer_items: Vec::new(),
             },
         })
     }
@@ -893,6 +1153,13 @@ impl App {
                     Event::Paste(text) => {
                         self.handle_paste(text)?;
                     }
+                    // Mouse click: hit-test against registered click regions and dispatch
+                    Event::Mouse(mouse) => {
+                        use crossterm::event::{MouseButton, MouseEventKind};
+                        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                            self.handle_mouse_click(mouse.column, mouse.row)?;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -939,19 +1206,36 @@ impl App {
 
     pub fn draw(&mut self) -> Result<()> {
         let state = &self.state;
+
+        // Mutable captures written during the draw closure — needed because
+        // draw_board builds click regions at render time but we need them in
+        // state for mouse hit-testing after the frame is rendered.
+        let mut click_regions = Vec::new();
+        let mut footer_items = Vec::new();
+
         self.terminal.draw(|frame| {
             let area = frame.area();
 
             match &state.mode {
                 AppMode::Dashboard => Self::draw_dashboard(state, frame, area),
-                AppMode::Project(_) => Self::draw_board(state, frame, area),
+                AppMode::Project(_) => {
+                    let (regions, items) = Self::draw_board(state, frame, area);
+                    click_regions = regions;
+                    footer_items = items;
+                }
             }
         })?;
+
+        // Store click regions and footer items in state for mouse hit-testing
+        // (F2 nav and mouse clicks both read from these after draw completes)
+        self.state.click_regions = click_regions;
+        self.state.footer_items = footer_items;
 
         Ok(())
     }
 
-    fn draw_board(state: &AppState, frame: &mut Frame, area: Rect) {
+    /// Renders the kanban board and returns (click_regions, footer_items) for mouse hit-testing.
+    fn draw_board(state: &AppState, frame: &mut Frame, area: Rect) -> (Vec<ClickRegion>, Vec<FooterItem>) {
         // Main layout with optional sidebar
         let main_chunks = if state.sidebar_visible {
             Layout::default()
@@ -1182,38 +1466,32 @@ impl App {
             .and_then(|t| t.plugin.as_ref())
             .and_then(|name| WorkflowPlugin::load(name, state.project_path.as_deref()).ok())
             .map_or(false, |p| p.cyclic);
-        let (footer_text, footer_style) = if let Some((ref msg, created)) = state.warning_message {
+        let footer_style = if let Some((ref msg, created)) = state.warning_message {
             if created.elapsed() < std::time::Duration::from_secs(5) {
-                (msg.clone(), Style::default().fg(Color::Yellow))
+                Style::default().fg(Color::Yellow)
             } else {
-                (
-                    build_footer_text(
-                        state.input_mode,
-                        state.sidebar_focused,
-                        state.board.selected_column,
-                        has_cyclic_plugin,
-                        state.config.fullscreen_on_enter,
-                    ),
-                    Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
-                )
+                Style::default().fg(hex_to_color(&state.config.theme.color_dimmed))
             }
         } else {
-            (
-                build_footer_text(
-                    state.input_mode,
-                    state.sidebar_focused,
-                    state.board.selected_column,
-                    has_cyclic_plugin,
-                    state.config.fullscreen_on_enter,
-                ),
-                Style::default().fg(hex_to_color(&state.config.theme.color_dimmed)),
-            )
+            Style::default().fg(hex_to_color(&state.config.theme.color_dimmed))
         };
 
-        let footer = Paragraph::new(footer_text.as_str())
-            .style(footer_style)
-            .block(Block::default().borders(Borders::ALL));
-        frame.render_widget(footer, chunks[2]);
+        let items = build_footer_items(
+            state.input_mode,
+            state.sidebar_focused,
+            state.board.selected_column,
+            has_cyclic_plugin,
+            state.config.fullscreen_on_enter,
+        );
+        // build_and_render_footer registers click regions and renders the interactive paragraph
+        let regions = build_and_render_footer(
+            &items,
+            state.footer_nav_active,
+            state.footer_nav_index,
+            chunks[2],
+            frame,
+            footer_style,
+        );
 
         // Input overlay if in input mode
         if matches!(
@@ -2089,6 +2367,10 @@ impl App {
             );
             frame.render_widget(footer, popup_chunks[2]);
         }
+
+        // Return empty click regions / footer items from draw_board
+        // (popup-specific click regions are registered separately in each popup's render block)
+        (Vec::new(), Vec::new())
     }
 
     fn draw_shell_popup(popup: &ShellPopup, frame: &mut Frame, area: Rect, theme: &ThemeConfig) {
@@ -2445,6 +2727,55 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> Result<()> {
+        // F2 = toggle footer keyboard navigation mode (only in Normal mode with no popups open)
+        if key.code == KeyCode::F(2) {
+            let no_popup = self.state.shell_popup.is_none()
+                && self.state.pr_confirm_popup.is_none()
+                && self.state.diff_popup.is_none()
+                && self.state.task_search.is_none()
+                && self.state.plugin_select_popup.is_none()
+                && self.state.move_confirm_popup.is_none()
+                && self.state.done_confirm_popup.is_none()
+                && self.state.delete_confirm_popup.is_none()
+                && self.state.review_confirm_popup.is_none();
+            if no_popup && self.state.input_mode == InputMode::Normal {
+                self.state.footer_nav_active = !self.state.footer_nav_active;
+                if self.state.footer_nav_active {
+                    self.state.footer_nav_index = 0;
+                }
+            }
+            return Ok(());
+        }
+
+        // Footer nav: Left/Right/Enter/Esc to navigate and activate items
+        if self.state.footer_nav_active {
+            match key.code {
+                KeyCode::Left | KeyCode::Char('h') => {
+                    self.state.footer_nav_index = self.state.footer_nav_index.saturating_sub(1);
+                    return Ok(());
+                }
+                KeyCode::Right | KeyCode::Char('l') => {
+                    let max = self.state.footer_items.len().saturating_sub(1);
+                    if self.state.footer_nav_index < max {
+                        self.state.footer_nav_index += 1;
+                    }
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    self.state.footer_nav_active = false;
+                    if let Some(item) = self.state.footer_items.get(self.state.footer_nav_index).cloned() {
+                        return self.handle_key(item.trigger);
+                    }
+                    return Ok(());
+                }
+                KeyCode::Esc => {
+                    self.state.footer_nav_active = false;
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         // Handle PR status popup if open (loading/success/error)
         if let Some(ref popup) = self.state.pr_status_popup {
             // Only allow closing if not in Creating/Pushing state
@@ -3138,6 +3469,25 @@ impl App {
                         self.state.tmux_ops.as_ref(),
                     );
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Hit-test a mouse click against registered click regions and dispatch to handle_key.
+    /// Re-enters handle_key with the region's trigger KeyEvent — one-level recursion only,
+    /// not a loop, so borrow checker is satisfied.
+    fn handle_mouse_click(&mut self, col: u16, row: u16) -> Result<()> {
+        let regions = self.state.click_regions.clone();
+        for region in &regions {
+            // Check if click is within this region's bounds (inclusive of start, exclusive of end)
+            if col >= region.area.x
+                && col < region.area.x + region.area.width
+                && row >= region.area.y
+                && row < region.area.y + region.area.height
+            {
+                // Dispatch via handle_key for consistent processing (F2 nav uses same path)
+                return self.handle_key(region.trigger.clone());
             }
         }
         Ok(())
@@ -6403,6 +6753,8 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        // Disable mouse capture first (before raw mode cleanup)
+        let _ = execute!(io::stdout(), DisableMouseCapture);
         match self.terminal.backend_mut() {
             AppBackend::Crossterm(backend) => {
                 let _ = disable_raw_mode();
